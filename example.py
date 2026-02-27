@@ -11,10 +11,13 @@ Run with:
 
 import random
 import math
+import tempfile
+from unittest.mock import MagicMock
 from src.data.models import ItemHistory, PriceRecord
 from src.analysis.market_maker import market_maker_score
 from src.strategy.signal import generate_signals
 from src.backtest.engine import run_backtest
+from src.data.fetcher import SteamOrderBookFetcher, _NameIdCache
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +57,61 @@ def generate_synthetic_history(
         )
 
     return ItemHistory(item_name=item_name, records=records)
+
+
+def demo_order_book_fetcher() -> None:
+    """Demonstrate order-book fetching using an injected mock session (fully offline)."""
+    # --- Build a mock response that mirrors the real Steam API JSON ---
+    fake_response = {
+        "success": 1,
+        "sell_order_count": "1,234",
+        "buy_order_count": "567",
+        "sell_order_graph": [
+            [10.50, 3, "3 orders at $10.50"],
+            [10.75, 7, "10 orders at $10.75"],
+            [11.00, 5, "15 orders at $11.00"],
+            [11.25, 2, "17 orders at $11.25"],
+            [11.50, 4, "21 orders at $11.50"],
+            [12.00, 8, "29 orders at $12.00"],
+        ],
+        "buy_order_graph": [
+            [10.00, 6, "6 orders at $10.00"],
+            [9.75,  4, "10 orders at $9.75"],
+            [9.50,  9, "19 orders at $9.50"],
+            [9.25,  1, "20 orders at $9.25"],
+            [9.00,  3, "23 orders at $9.00"],
+            [8.75,  2, "25 orders at $8.75"],
+        ],
+    }
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = fake_response
+    mock_resp.text = "<script>Market_LoadOrderSpread(176923345);</script>"
+
+    mock_session = MagicMock()
+    mock_session.get.return_value = mock_resp
+
+    item_name = "AK-47 | Redline (Field-Tested)"
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = _NameIdCache(cache_path=__import__('pathlib').Path(tmpdir) / "nameid_cache.json")
+        fetcher = SteamOrderBookFetcher(session=mock_session, cache=cache)
+        cache.load_from_dict({"AK-47 | Redline (Field-Tested)": 176923345})
+        ob = fetcher.fetch_order_book(item_name)
+
+    print(f"\n{'='*60}")
+    print(f"  Order Book Snapshot Demo (offline mock)")
+    print(f"{'='*60}")
+    print(f"  Item      : {ob.item_name}")
+    print(f"  Timestamp : {ob.timestamp} (UTC Unix)")
+    print(f"  Ask (sell): ${ob.lowest_ask_price:.2f}   Bid (buy): ${ob.highest_bid_price:.2f}")
+    print(f"  Spread    : ${ob.spread:.4f}   Mid-price: ${ob.mid_price:.4f}")
+    print(f"  Ask depth (top-5): {ob.ask_volume_top5_cumulative} units")
+    print(f"  Bid depth (top-5): {ob.bid_volume_top5_cumulative} units")
+    print(f"  Total sell orders: {ob.total_sell_orders}")
+    print(f"  Total buy  orders: {ob.total_buy_orders}")
+    print(f"{'='*60}\n")
 
 
 def main():
@@ -120,6 +178,8 @@ def main():
             )
 
     print(f"\n{'='*60}\n")
+
+    demo_order_book_fetcher()
 
 
 if __name__ == "__main__":

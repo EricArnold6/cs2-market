@@ -17,7 +17,7 @@ maker activity based on price action and volume patterns:
 
 from typing import List, Optional, Tuple
 
-from src.data.models import ItemHistory
+from src.acquisition.models import ItemHistory
 from src.analysis.indicators import (
     bollinger_bands,
     rsi,
