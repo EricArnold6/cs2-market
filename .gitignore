@@ -11,3 +11,4 @@ venv/
 # Steam market scraper runtime artifacts
 src/data/nameid_cache.json
 src/data/nameid_cache.tmp
+/CLAUDE.md
