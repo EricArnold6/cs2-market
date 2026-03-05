@@ -12,3 +12,6 @@ venv/
 src/data/nameid_cache.json
 src/data/nameid_cache.tmp
 /CLAUDE.md
+/config/settings.json
+/.claude/
+dingTest.py

@@ -1,0 +1,79 @@
+2026-03-05 22:25:47,518 [INFO] orchestrator — === QuantOrchestrator starting up ===
+2026-03-05 22:25:47,519 [INFO] orchestrator — Resolving nameids for 2 item(s)…
+2026-03-05 22:25:47,519 [INFO] src.acquisition.initializer — NameIdInitializer: 0 cache hits, 2 to fetch
+2026-03-05 22:25:48,639 [INFO] src.acquisition.initializer — resolved [1/2]: 'AK-47 | Redline (Field-Tested)'
+2026-03-05 22:25:58,651 [INFO] src.acquisition.initializer — resolved [2/2]: 'AWP | Asiimov (Field-Tested)'
+2026-03-05 22:25:58,651 [INFO] src.acquisition.initializer — NameIdInitializer complete: InitResult(resolved=2, cache_hits=0, failed=0)
+2026-03-05 22:25:58,651 [INFO] orchestrator — NameId init: InitResult(resolved=2, cache_hits=0, failed=0)
+2026-03-05 22:25:58,694 [ERROR] orchestrator — Unhandled exception in main: 'utf-8' codec can't decode byte 0xd6 in position 235: invalid continuation byte
+Traceback (most recent call last):
+  File "D:\Desktop\code\cs2-market\main.py", line 237, in main
+    orchestrator.startup()
+    ~~~~~~~~~~~~~~~~~~~~^^
+  File "D:\Desktop\code\cs2-market\main.py", line 117, in startup
+    self._db.connect()
+    ~~~~~~~~~~~~~~~~^^
+  File "D:\Desktop\code\cs2-market\src\storage\database.py", line 44, in connect
+    self._conn = psycopg2.connect(**self._config)
+                 ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^
+  File "D:\Desktop\code\cs2-market\.venv\Lib\site-packages\psycopg2\__init__.py", line 135, in connect
+    conn = _connect(dsn, connection_factory=connection_factory, **kwasync)
+UnicodeDecodeError: 'utf-8' codec can't decode byte 0xd6 in position 235: invalid continuation byte
+2026-03-05 22:25:58,695 [INFO] orchestrator — Shutting down…
+2026-03-05 22:25:58,990 [ERROR] src.alerting.bot — DingTalk API error 300005: token is not exist
+2026-03-05 22:25:58,991 [INFO] orchestrator — Database connection closed. Goodbye.
+2026-03-05 22:27:17,169 [INFO] orchestrator — === QuantOrchestrator starting up ===
+2026-03-05 22:27:17,169 [INFO] orchestrator — Resolving nameids for 2 item(s)…
+2026-03-05 22:27:17,169 [INFO] src.acquisition.initializer — NameIdInitializer: 2 cache hits, 0 to fetch
+2026-03-05 22:27:17,169 [INFO] src.acquisition.initializer — NameIdInitializer complete: InitResult(resolved=0, cache_hits=2, failed=0)
+2026-03-05 22:27:17,169 [INFO] orchestrator — NameId init: InitResult(resolved=0, cache_hits=2, failed=0)
+2026-03-05 22:27:17,303 [ERROR] orchestrator — Unhandled exception in main: 'utf-8' codec can't decode byte 0xd6 in position 235: invalid continuation byte
+Traceback (most recent call last):
+  File "D:\Desktop\code\cs2-market\main.py", line 237, in main
+    orchestrator.startup()
+    ~~~~~~~~~~~~~~~~~~~~^^
+  File "D:\Desktop\code\cs2-market\main.py", line 117, in startup
+    self._db.connect()
+    ~~~~~~~~~~~~~~~~^^
+  File "D:\Desktop\code\cs2-market\src\storage\database.py", line 44, in connect
+    self._conn = psycopg2.connect(**self._config)
+                 ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^
+  File "D:\Desktop\code\cs2-market\.venv\Lib\site-packages\psycopg2\__init__.py", line 135, in connect
+    conn = _connect(dsn, connection_factory=connection_factory, **kwasync)
+UnicodeDecodeError: 'utf-8' codec can't decode byte 0xd6 in position 235: invalid continuation byte
+2026-03-05 22:27:17,305 [INFO] orchestrator — Shutting down…
+2026-03-05 22:27:17,604 [INFO] orchestrator — Database connection closed. Goodbye.
+2026-03-05 22:27:30,342 [INFO] orchestrator — === QuantOrchestrator starting up ===
+2026-03-05 22:27:30,343 [INFO] orchestrator — Resolving nameids for 2 item(s)…
+2026-03-05 22:27:30,343 [INFO] src.acquisition.initializer — NameIdInitializer: 2 cache hits, 0 to fetch
+2026-03-05 22:27:30,343 [INFO] src.acquisition.initializer — NameIdInitializer complete: InitResult(resolved=0, cache_hits=2, failed=0)
+2026-03-05 22:27:30,343 [INFO] orchestrator — NameId init: InitResult(resolved=0, cache_hits=2, failed=0)
+2026-03-05 22:27:30,375 [ERROR] orchestrator — Unhandled exception in main: 'utf-8' codec can't decode byte 0xd6 in position 235: invalid continuation byte
+Traceback (most recent call last):
+  File "D:\Desktop\code\cs2-market\main.py", line 237, in main
+    orchestrator.startup()
+    ~~~~~~~~~~~~~~~~~~~~^^
+  File "D:\Desktop\code\cs2-market\main.py", line 117, in startup
+    self._db.connect()
+    ~~~~~~~~~~~~~~~~^^
+  File "D:\Desktop\code\cs2-market\src\storage\database.py", line 44, in connect
+    self._conn = psycopg2.connect(**self._config)
+                 ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^
+  File "D:\Desktop\code\cs2-market\.venv\Lib\site-packages\psycopg2\__init__.py", line 135, in connect
+    conn = _connect(dsn, connection_factory=connection_factory, **kwasync)
+UnicodeDecodeError: 'utf-8' codec can't decode byte 0xd6 in position 235: invalid continuation byte
+2026-03-05 22:27:30,376 [INFO] orchestrator — Shutting down…
+2026-03-05 22:27:30,651 [INFO] orchestrator — Database connection closed. Goodbye.
+2026-03-05 22:30:46,150 [INFO] orchestrator — === QuantOrchestrator starting up ===
+2026-03-05 22:30:46,150 [INFO] orchestrator — Resolving nameids for 2 item(s)…
+2026-03-05 22:30:46,150 [INFO] src.acquisition.initializer — NameIdInitializer: 2 cache hits, 0 to fetch
+2026-03-05 22:30:46,150 [INFO] src.acquisition.initializer — NameIdInitializer complete: InitResult(resolved=0, cache_hits=2, failed=0)
+2026-03-05 22:30:46,150 [INFO] orchestrator — NameId init: InitResult(resolved=0, cache_hits=2, failed=0)
+2026-03-05 22:30:46,180 [INFO] orchestrator — Database connection established.
+2026-03-05 22:30:46,497 [INFO] orchestrator — Startup complete.
+2026-03-05 22:30:46,497 [INFO] orchestrator — Entering scan loop: 2 item(s), interval=900s
+2026-03-05 22:30:46,497 [INFO] orchestrator — Processing 'AK-47 | Redline (Field-Tested)' (nameid=17622556)
+2026-03-05 22:30:47,295 [INFO] orchestrator — Insufficient data for anomaly detection on 'AK-47 | Redline (Field-Tested)', skipping.
+2026-03-05 22:30:53,054 [INFO] orchestrator — Processing 'AWP | Asiimov (Field-Tested)' (nameid=14922215)
+2026-03-05 22:30:53,278 [INFO] orchestrator — Insufficient data for anomaly detection on 'AWP | Asiimov (Field-Tested)', skipping.
+2026-03-05 22:30:53,280 [INFO] orchestrator — Scan cycle complete. Sleeping 900s…
