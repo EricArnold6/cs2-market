@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.acquisition.models import OrderBook
+from src.schemas.market import OrderBookSnapshot
 from src.storage import DatabaseConnection, OrderBookRepository
 
 
@@ -14,7 +14,7 @@ from src.storage import DatabaseConnection, OrderBookRepository
 # Helper
 # ---------------------------------------------------------------------------
 
-def _make_orderbook(
+def _make_snapshot(
     item_name="AK-47 | Redline (Field-Tested)",
     timestamp=None,
     lowest_ask=10.50,
@@ -23,17 +23,21 @@ def _make_orderbook(
     bid_vol=200,
     total_sell=500,
     total_buy=300,
-) -> OrderBook:
-    return OrderBook(
+) -> OrderBookSnapshot:
+    return OrderBookSnapshot(
         item_name=item_name,
         timestamp=timestamp or int(time.time()),
         lowest_ask_price=lowest_ask,
         highest_bid_price=highest_bid,
-        ask_volume_top5_cumulative=ask_vol,
-        bid_volume_top5_cumulative=bid_vol,
+        ask_volume_top5=ask_vol,
+        bid_volume_top5=bid_vol,
         total_sell_orders=total_sell,
         total_buy_orders=total_buy,
     )
+
+
+# Backward-compat alias so existing test call-sites don't need updating
+_make_orderbook = _make_snapshot
 
 
 # ---------------------------------------------------------------------------

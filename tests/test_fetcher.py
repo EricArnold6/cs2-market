@@ -13,17 +13,16 @@ from unittest.mock import MagicMock, patch, call
 
 import pytest
 
-from src.data.fetcher import (
+from src.acquisition.http_client import (
     SteamOrderBookFetcher,
-    _NameIdCache,
     _USER_AGENTS,
     NameIdExtractionError,
     NameIdNotInitializedError,
-    InitResult,
-    NameIdInitializer,
 )
-from src.data.models import OrderBook
-from src.data.scheduler import PollingScheduler
+from src.acquisition.cache import _NameIdCache
+from src.acquisition.initializer import NameIdInitializer, InitResult
+from src.acquisition.models import OrderBook
+from src.acquisition.scheduler import PollingScheduler
 
 # ---------------------------------------------------------------------------
 # Shared fixtures / fake data
@@ -137,12 +136,12 @@ class TestParseOrderBook:
     def test_ask_volume_top5(self):
         """Top-5 ask volumes: 3+7+5+2+4 = 21."""
         ob = SteamOrderBookFetcher._parse_order_book("item", FAKE_ORDERBOOK_RESPONSE)
-        assert ob.ask_volume_top5_cumulative == 21
+        assert ob.ask_volume_top5 == 21
 
     def test_bid_volume_top5(self):
         """Top-5 bid volumes: 6+4+9+1+3 = 23."""
         ob = SteamOrderBookFetcher._parse_order_book("item", FAKE_ORDERBOOK_RESPONSE)
-        assert ob.bid_volume_top5_cumulative == 23
+        assert ob.bid_volume_top5 == 23
 
     def test_total_sell_orders_parses_comma(self):
         """'1,234' sell orders → 1234."""
@@ -162,8 +161,8 @@ class TestParseOrderBook:
         ob = SteamOrderBookFetcher._parse_order_book("item", {})
         assert ob.lowest_ask_price == 0.0
         assert ob.highest_bid_price == 0.0
-        assert ob.ask_volume_top5_cumulative == 0
-        assert ob.bid_volume_top5_cumulative == 0
+        assert ob.ask_volume_top5 == 0
+        assert ob.bid_volume_top5 == 0
         assert ob.total_sell_orders == 0
         assert ob.total_buy_orders == 0
 
@@ -176,8 +175,8 @@ class TestParseOrderBook:
             "buy_order_count": "1",
         }
         ob = SteamOrderBookFetcher._parse_order_book("item", data)
-        assert ob.ask_volume_top5_cumulative == 5   # 2+3
-        assert ob.bid_volume_top5_cumulative == 1
+        assert ob.ask_volume_top5 == 5   # 2+3
+        assert ob.bid_volume_top5 == 1
 
 
 # ===========================================================================
@@ -260,7 +259,7 @@ class TestFetchOrderBook:
         mock_session.get.side_effect = [resp_429, resp_200]
         f = SteamOrderBookFetcher(session=mock_session, cache=tmp_cache)
 
-        with patch("src.data.fetcher.time.sleep"):
+        with patch("src.acquisition.http_client.time.sleep"):
             result = f.fetch_order_book("AK-47 | Redline (Field-Tested)")
         assert isinstance(result, OrderBook)
 
@@ -273,7 +272,7 @@ class TestFetchOrderBook:
         mock_session.get.return_value = resp_429
 
         f = SteamOrderBookFetcher(session=mock_session, cache=tmp_cache)
-        with patch("src.data.fetcher.time.sleep"):
+        with patch("src.acquisition.http_client.time.sleep"):
             with pytest.raises(RuntimeError):
                 f.fetch_order_book("AK-47 | Redline (Field-Tested)")
 
@@ -302,7 +301,7 @@ class TestFetchMultiple:
         tmp_cache.set("Item A", 111)
         tmp_cache.set("Item B", 222)
         f = SteamOrderBookFetcher(session=mock_session, cache=tmp_cache)
-        with patch("src.data.fetcher.time.sleep"):
+        with patch("src.acquisition.http_client.time.sleep"):
             results = f.fetch_multiple(["Item A", "Item B"])
         assert len(results) == 2
 
@@ -311,7 +310,7 @@ class TestFetchMultiple:
         for i, name in enumerate(["Item A", "Item B", "Item C"]):
             tmp_cache.set(name, i + 100)
         f = SteamOrderBookFetcher(session=mock_session, cache=tmp_cache)
-        with patch("src.data.fetcher.time.sleep") as mock_sleep:
+        with patch("src.acquisition.http_client.time.sleep") as mock_sleep:
             f.fetch_multiple(["Item A", "Item B", "Item C"])
         assert mock_sleep.call_count == 2
 
@@ -333,7 +332,7 @@ class TestFetchMultiple:
         mock_session.get.side_effect = [good_resp, bad_resp]
 
         f = SteamOrderBookFetcher(session=mock_session, cache=tmp_cache)
-        with patch("src.data.fetcher.time.sleep"):
+        with patch("src.acquisition.http_client.time.sleep"):
             results = f.fetch_multiple(["Good Item", "Bad Item"])
         assert len(results) == 1
         assert results[0].item_name == "Good Item"
@@ -351,8 +350,8 @@ class TestOrderBookProperties:
             timestamp=int(time.time()),
             lowest_ask_price=ask,
             highest_bid_price=bid,
-            ask_volume_top5_cumulative=10,
-            bid_volume_top5_cumulative=10,
+            ask_volume_top5=10,
+            bid_volume_top5=10,
             total_buy_orders=100,
             total_sell_orders=100,
         )
@@ -394,14 +393,14 @@ class TestPollingScheduler:
         """on_snapshot callback must be called after poll_once."""
         received = []
         sched = self._make_scheduler(tmp_cache, mock_session, callback=received.append)
-        with patch("src.data.fetcher.time.sleep"):
+        with patch("src.acquisition.http_client.time.sleep"):
             sched.poll_once()
         assert len(received) == 1
 
     def test_poll_once_returns_list(self, tmp_cache, mock_session):
         """poll_once must return a list of OrderBook objects."""
         sched = self._make_scheduler(tmp_cache, mock_session)
-        with patch("src.data.fetcher.time.sleep"):
+        with patch("src.acquisition.http_client.time.sleep"):
             result = sched.poll_once()
         assert isinstance(result, list)
         assert len(result) == 1
@@ -415,8 +414,8 @@ class TestPollingScheduler:
         def _run():
             sched.run_forever(stop_event=stop)
 
-        with patch("src.data.fetcher.time.sleep"), \
-             patch("src.data.scheduler.time.sleep"):
+        with patch("src.acquisition.http_client.time.sleep"), \
+             patch("src.acquisition.scheduler.time.sleep"):
             t = threading.Thread(target=_run, daemon=True)
             t.start()
             time.sleep(0.1)
@@ -432,7 +431,7 @@ class TestPollingScheduler:
     def test_last_poll_time_updated_after_poll(self, tmp_cache, mock_session):
         """After poll_once, last_poll_time must be a positive float."""
         sched = self._make_scheduler(tmp_cache, mock_session)
-        with patch("src.data.fetcher.time.sleep"):
+        with patch("src.acquisition.http_client.time.sleep"):
             sched.poll_once()
         assert sched.last_poll_time is not None
         assert sched.last_poll_time > 0
@@ -624,7 +623,7 @@ class TestNameIdInitializer:
         """All 3 items are uncached → all appear in result.resolved."""
         f = self._make_fetcher(tmp_cache, mock_session)
         initializer = NameIdInitializer(f, delay_min_s=0, delay_max_s=0)
-        with patch("src.data.fetcher.time.sleep"):
+        with patch("src.acquisition.http_client.time.sleep"):
             result = initializer.run(["Item A", "Item B", "Item C"])
         assert set(result.resolved) == {"Item A", "Item B", "Item C"}
         assert result.failed == {}
@@ -644,7 +643,7 @@ class TestNameIdInitializer:
             return call_count[0]
 
         with patch.object(f, "resolve_item_nameid", side_effect=_side_effect):
-            with patch("src.data.fetcher.time.sleep"):
+            with patch("src.acquisition.http_client.time.sleep"):
                 result = initializer.run(["Item A", "Item B", "Item C"])
 
         assert "Item B" in result.failed
@@ -655,7 +654,7 @@ class TestNameIdInitializer:
         """When no failures, all_succeeded is True."""
         f = self._make_fetcher(tmp_cache, mock_session)
         initializer = NameIdInitializer(f, delay_min_s=0, delay_max_s=0)
-        with patch("src.data.fetcher.time.sleep"):
+        with patch("src.acquisition.http_client.time.sleep"):
             result = initializer.run(["Item A"])
         assert result.all_succeeded is True
 
@@ -671,7 +670,7 @@ class TestNameIdInitializer:
         """3 items to fetch → sleep called exactly 2 times (not after last one)."""
         f = self._make_fetcher(tmp_cache, mock_session)
         initializer = NameIdInitializer(f, delay_min_s=0, delay_max_s=0)
-        with patch("src.data.fetcher.time.sleep") as mock_sleep:
+        with patch("src.acquisition.http_client.time.sleep") as mock_sleep:
             result = initializer.run(["Item A", "Item B", "Item C"])
         assert mock_sleep.call_count == 2
 
@@ -681,7 +680,7 @@ class TestNameIdInitializer:
         tmp_cache.set("Item B", 222)
         f = self._make_fetcher(tmp_cache, mock_session)
         initializer = NameIdInitializer(f, delay_min_s=0, delay_max_s=0)
-        with patch("src.data.fetcher.time.sleep") as mock_sleep:
+        with patch("src.acquisition.http_client.time.sleep") as mock_sleep:
             # Item C is the only uncached item → it's both first and last in to_fetch
             result = initializer.run(["Item A", "Item B", "Item C"])
         assert mock_sleep.call_count == 0

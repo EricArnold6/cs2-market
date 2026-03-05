@@ -1,7 +1,7 @@
 """Tests for the backtesting engine."""
 
 import pytest
-from src.data.models import ItemHistory, PriceRecord
+from src.acquisition.models import ItemHistory, PriceRecord
 from src.backtest.engine import run_backtest, BacktestResult
 
 

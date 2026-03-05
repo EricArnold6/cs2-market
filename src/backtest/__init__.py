@@ -1,3 +1,5 @@
-"""兼容层：src.backtest → src.analysis.backtest"""
-from src.analysis.backtest.engine import *   # noqa: F401, F403
-from src.analysis.backtest.models import Trade, BacktestResult  # noqa: F401
+"""Backtesting engine."""
+from .models import Trade, BacktestResult
+from .engine import run_backtest
+
+__all__ = ["Trade", "BacktestResult", "run_backtest"]

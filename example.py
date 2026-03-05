@@ -13,11 +13,12 @@ import random
 import math
 import tempfile
 from unittest.mock import MagicMock
-from src.data.models import ItemHistory, PriceRecord
+from src.acquisition.models import ItemHistory, PriceRecord
 from src.analysis.market_maker import market_maker_score
 from src.strategy.signal import generate_signals
 from src.backtest.engine import run_backtest
-from src.data.fetcher import SteamOrderBookFetcher, _NameIdCache
+from src.acquisition.http_client import SteamOrderBookFetcher
+from src.acquisition.cache import _NameIdCache
 
 
 # ---------------------------------------------------------------------------

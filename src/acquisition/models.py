@@ -3,6 +3,9 @@
 from dataclasses import dataclass, field
 from typing import List, Optional
 
+# 向后兼容别名：OrderBook 现已迁移到全局契约 src.schemas.market.OrderBookSnapshot
+from src.schemas.market import OrderBookSnapshot as OrderBook  # noqa: F401
+
 
 @dataclass
 class PriceRecord:
@@ -45,28 +48,3 @@ class TradeSignal:
     price: Optional[float] = None
 
 
-@dataclass
-class OrderBook:
-    """Steam 市场订单簿的单次清洗快照。"""
-    item_name: str
-    timestamp: int                      # UTC Unix 时间戳（整秒）
-    lowest_ask_price: float             # 最低卖价（卖一）；无卖单时为 0.0
-    highest_bid_price: float            # 最高买价（买一）；无买单时为 0.0
-    ask_volume_top5_cumulative: int     # 卖方前5档累计挂单量
-    bid_volume_top5_cumulative: int     # 买方前5档累计求购量
-    total_buy_orders: int               # 全部买单总数
-    total_sell_orders: int              # 全部卖单总数
-
-    @property
-    def spread(self) -> float:
-        """买卖价差（绝对值）。任一侧为空时返回 0.0。"""
-        if self.lowest_ask_price == 0.0 or self.highest_bid_price == 0.0:
-            return 0.0
-        return round(self.lowest_ask_price - self.highest_bid_price, 4)
-
-    @property
-    def mid_price(self) -> float:
-        """买卖中间价。任一侧为空时返回 0.0。"""
-        if self.lowest_ask_price == 0.0 or self.highest_bid_price == 0.0:
-            return 0.0
-        return round((self.lowest_ask_price + self.highest_bid_price) / 2.0, 4)

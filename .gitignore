@@ -7,6 +7,8 @@ dist/
 build/
 .venv/
 venv/
+*.py[cod]
+*$py.class
 
 # Steam market scraper runtime artifacts
 src/data/nameid_cache.json
@@ -15,3 +17,11 @@ src/data/nameid_cache.tmp
 /config/settings.json
 /.claude/
 dingTest.py
+/logs/
+data/
+
+
+# 其他你目前需要忽略的本地环境
+.idea/
+logs/
+config/settings.json

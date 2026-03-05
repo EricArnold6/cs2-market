@@ -10,12 +10,14 @@ from .initializer import NameIdInitializer, InitResult
 from .scheduler import PollingScheduler
 from .exceptions import NameIdExtractionError, NameIdNotInitializedError
 from .cache import _NameIdCache
+from src.schemas.market import OrderBookSnapshot
 
 __all__ = [
     "PriceRecord",
     "ItemHistory",
     "TradeSignal",
     "OrderBook",
+    "OrderBookSnapshot",
     "SteamOrderBookFetcher",
     "NameIdInitializer",
     "InitResult",

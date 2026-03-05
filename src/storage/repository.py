@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 from psycopg2.extras import execute_values
 
-from src.acquisition.models import OrderBook
+from src.schemas.market import OrderBookSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +26,7 @@ class OrderBookRepository:
         with self._conn.cursor() as cur:
             cur.execute(sql, (item_nameid, market_hash_name))
 
-    def insert_snapshot(self, snapshot: OrderBook, item_nameid: int) -> None:
+    def insert_snapshot(self, snapshot: OrderBookSnapshot, item_nameid: int) -> None:
         """Insert a single order book snapshot."""
         row = self._orderbook_to_row(snapshot, item_nameid)
         sql = """
@@ -89,8 +89,8 @@ class OrderBookRepository:
         return dict(zip(keys, row))
 
     @staticmethod
-    def _orderbook_to_row(snapshot: OrderBook, item_nameid: int) -> tuple:
-        """Convert an OrderBook to a DB row tuple."""
+    def _orderbook_to_row(snapshot: OrderBookSnapshot, item_nameid: int) -> tuple:
+        """Convert an OrderBookSnapshot to a DB row tuple."""
         ts = datetime.fromtimestamp(snapshot.timestamp, tz=timezone.utc)
         ask = snapshot.lowest_ask_price if snapshot.lowest_ask_price != 0.0 else None
         bid = snapshot.highest_bid_price if snapshot.highest_bid_price != 0.0 else None
@@ -99,8 +99,8 @@ class OrderBookRepository:
             item_nameid,
             ask,
             bid,
-            snapshot.ask_volume_top5_cumulative,
-            snapshot.bid_volume_top5_cumulative,
+            snapshot.ask_volume_top5,
+            snapshot.bid_volume_top5,
             snapshot.total_sell_orders,
             snapshot.total_buy_orders,
         )

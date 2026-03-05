@@ -1,7 +1,7 @@
 """Tests for market maker detection."""
 
 import pytest
-from src.data.models import ItemHistory, PriceRecord
+from src.acquisition.models import ItemHistory, PriceRecord
 from src.analysis.market_maker import (
     detect_volume_spikes,
     detect_price_momentum,

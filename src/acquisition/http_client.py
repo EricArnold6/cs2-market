@@ -13,7 +13,7 @@ except ImportError:  # pragma: no cover
 
 from src.acquisition.exceptions import NameIdExtractionError, NameIdNotInitializedError
 from src.acquisition.cache import _NameIdCache
-from src.acquisition.models import OrderBook
+from src.schemas.market import OrderBookSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -145,14 +145,14 @@ class SteamOrderBookFetcher:
         logger.debug("Resolved nameid for %r: %d", item_name, nameid)
         return nameid
 
-    def fetch_order_book(self, item_name: str) -> OrderBook:
-        """Fetch and return a cleaned :class:`~src.acquisition.models.OrderBook` snapshot.
+    def fetch_order_book(self, item_name: str) -> OrderBookSnapshot:
+        """Fetch and return a cleaned :class:`~src.schemas.market.OrderBookSnapshot` snapshot.
 
         Args:
             item_name: Market hash name of the item.
 
         Returns:
-            :class:`~src.acquisition.models.OrderBook` with the latest bid/ask data.
+            :class:`~src.schemas.market.OrderBookSnapshot` with the latest bid/ask data.
 
         Raises:
             NameIdNotInitializedError: If item_nameid not in cache (run
@@ -178,7 +178,7 @@ class SteamOrderBookFetcher:
         raw = resp.json()
         return self._parse_order_book(item_name, raw)
 
-    def fetch_multiple(self, item_names: List[str]) -> List[OrderBook]:
+    def fetch_multiple(self, item_names: List[str]) -> List[OrderBookSnapshot]:
         """Fetch order books for multiple items, sleeping between each request.
 
         Individual item failures are logged as warnings and skipped; they do
@@ -188,10 +188,10 @@ class SteamOrderBookFetcher:
             item_names: List of market hash names.
 
         Returns:
-            List of successfully fetched :class:`~src.acquisition.models.OrderBook`
+            List of successfully fetched :class:`~src.schemas.market.OrderBookSnapshot`
             objects (may be shorter than *item_names* if some failed).
         """
-        results: List[OrderBook] = []
+        results: List[OrderBookSnapshot] = []
         for i, name in enumerate(item_names):
             if i > 0:
                 sleep_s = random.uniform(_SLEEP_MIN_S, _SLEEP_MAX_S)
@@ -271,8 +271,8 @@ class SteamOrderBookFetcher:
         raise RuntimeError(f"Exhausted retries for {url!r}")  # pragma: no cover
 
     @staticmethod
-    def _parse_order_book(item_name: str, raw: dict) -> OrderBook:
-        """Parse the raw ``itemordershistogram`` JSON into an :class:`OrderBook`.
+    def _parse_order_book(item_name: str, raw: dict) -> OrderBookSnapshot:
+        """Parse the raw ``itemordershistogram`` JSON into an :class:`OrderBookSnapshot`.
 
         This is a pure function with no side-effects.  Missing fields are
         silently replaced with zeros to avoid crashes on partial responses.
@@ -282,7 +282,7 @@ class SteamOrderBookFetcher:
             raw: Parsed JSON dict from the Steam API.
 
         Returns:
-            A fully populated :class:`~src.acquisition.models.OrderBook`.
+            A fully populated :class:`~src.schemas.market.OrderBookSnapshot`.
         """
         sell_graph = raw.get("sell_order_graph", [])
         buy_graph = raw.get("buy_order_graph", [])
@@ -308,13 +308,13 @@ class SteamOrderBookFetcher:
             except (KeyError, ValueError, TypeError):
                 return 0
 
-        return OrderBook(
+        return OrderBookSnapshot(
             item_name=item_name,
             timestamp=int(time.time()),
             lowest_ask_price=_price(sell_graph, 0),
             highest_bid_price=_price(buy_graph, 0),
-            ask_volume_top5_cumulative=_vol_top5(sell_graph),
-            bid_volume_top5_cumulative=_vol_top5(buy_graph),
+            ask_volume_top5=_vol_top5(sell_graph),
+            bid_volume_top5=_vol_top5(buy_graph),
             total_sell_orders=_total_orders(raw, "sell_order_count"),
             total_buy_orders=_total_orders(raw, "buy_order_count"),
         )
