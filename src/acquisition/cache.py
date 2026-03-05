@@ -11,7 +11,7 @@ from src.acquisition.exceptions import NameIdExtractionError, NameIdNotInitializ
 
 logger = logging.getLogger(__name__)
 
-_CACHE_FILE = Path(__file__).parent / "nameid_cache.json"
+_CACHE_FILE = Path(__file__).parent.parent.parent / "data" / "nameid_cache.json"
 
 
 class _NameIdCache:

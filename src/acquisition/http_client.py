@@ -2,8 +2,8 @@
 
 import logging
 import random
+import re
 import time
-from pathlib import Path
 from typing import List, Optional
 
 try:
@@ -26,7 +26,6 @@ CS2_APP_ID = 730
 _LISTING_URL = "https://steamcommunity.com/market/listings/{appid}/{name}"
 _ORDERBOOK_URL = "https://steamcommunity.com/market/itemordershistogram"
 
-import re
 _NAMEID_REGEX = re.compile(r"Market_LoadOrderSpread\(\s*(\d+)\s*\)")
 
 _RETRY_MAX = 3       # maximum retry attempts on HTTP 429
@@ -76,6 +75,97 @@ _USER_AGENTS: List[str] = [
 
 
 # ---------------------------------------------------------------------------
+# SteamHttpClient — pure network layer (UA rotation, proxy, 429 back-off)
+# ---------------------------------------------------------------------------
+
+class SteamHttpClient:
+    """Thin network shield: UA rotation, proxy dispatch, 429 exponential back-off.
+
+    This class has **no knowledge** of Steam API semantics — it only handles
+    the transport concerns.  Business-layer classes (e.g. :class:`SteamOrderBookFetcher`
+    and :class:`~src.acquisition.fetcher.MarketDataFetcher`) depend on this via
+    constructor injection, enabling easy unit-testing with a mock session.
+
+    Args:
+        proxies: Optional list of proxy URLs; one is chosen at random per
+                 request.  ``None`` or ``[]`` disables proxy use.
+        session: A ``requests.Session`` to reuse.  ``None`` creates a new one.
+    """
+
+    def __init__(
+        self,
+        proxies: Optional[List[str]] = None,
+        session: Optional[object] = None,
+    ) -> None:
+        self._proxies = proxies or []
+        self._session = session or (requests.Session() if requests else None)
+
+    def get(self, url: str, params, extra_headers: dict = None) -> object:
+        """Issue an HTTP GET with random UA, optional proxy, and 429 back-off.
+
+        Args:
+            url: Request URL.
+            params: Query-string parameters dict, or ``None``.
+            extra_headers: Additional headers to merge into the request
+                (e.g. browser-like headers for HTML pages).
+
+        Returns:
+            ``requests.Response`` with ``status_code == 200``.
+
+        Raises:
+            RuntimeError: After exhausting retries, or on non-429 errors.
+        """
+        if requests is None:  # pragma: no cover
+            raise ImportError("requests is required: pip install requests")
+
+        ua = random.choice(_USER_AGENTS)
+        headers = {"User-Agent": ua}
+        if extra_headers:
+            headers.update(extra_headers)
+        proxy_cfg = None
+        if self._proxies:
+            proxy_url = random.choice(self._proxies)
+            proxy_cfg = {"http": proxy_url, "https": proxy_url}
+
+        for attempt in range(1, _RETRY_MAX + 2):  # up to _RETRY_MAX retries
+            try:
+                resp = self._session.get(
+                    url,
+                    params=params,
+                    headers=headers,
+                    proxies=proxy_cfg,
+                    timeout=15,
+                )
+            except Exception as exc:
+                raise RuntimeError(f"Network error fetching {url!r}: {exc}") from exc
+
+            if resp.status_code == 429:
+                if attempt > _RETRY_MAX:
+                    raise RuntimeError(
+                        f"HTTP 429 rate-limited after {_RETRY_MAX} retries: {url!r}"
+                    )
+                wait = _RETRY_BASE_S * attempt
+                logger.warning(
+                    "HTTP 429 on attempt %d/%d, sleeping %ds …",
+                    attempt, _RETRY_MAX, wait,
+                )
+                time.sleep(wait)
+                continue
+
+            try:
+                resp.raise_for_status()
+            except Exception as exc:
+                raise RuntimeError(
+                    f"HTTP {resp.status_code} fetching {url!r}: {exc}"
+                ) from exc
+
+            return resp
+
+        # Should never be reached
+        raise RuntimeError(f"Exhausted retries for {url!r}")  # pragma: no cover
+
+
+# ---------------------------------------------------------------------------
 # SteamOrderBookFetcher
 # ---------------------------------------------------------------------------
 
@@ -92,6 +182,8 @@ class SteamOrderBookFetcher:
         session: A ``requests.Session`` to reuse.  ``None`` creates a new one.
         cache: A :class:`_NameIdCache` instance.  ``None`` uses the default
                on-disk cache at :data:`_CACHE_FILE`.
+        http_client: A :class:`SteamHttpClient` instance.  ``None`` creates one
+                     automatically from *proxies* and *session*.
     """
 
     def __init__(
@@ -100,11 +192,16 @@ class SteamOrderBookFetcher:
         proxies: Optional[List[str]] = None,
         session: Optional[object] = None,
         cache: Optional[_NameIdCache] = None,
+        http_client: Optional[SteamHttpClient] = None,
     ) -> None:
         self._appid = appid
-        self._proxies = proxies or []
-        self._session = session or (requests.Session() if requests else None)
         self._cache = cache if cache is not None else _NameIdCache()
+        self._http_client = http_client or SteamHttpClient(
+            proxies=proxies, session=session
+        )
+        # Keep these for backward compatibility (tests may inspect them directly)
+        self._proxies = self._http_client._proxies
+        self._session = self._http_client._session
 
     # ------------------------------------------------------------------
     # Public API
@@ -207,13 +304,12 @@ class SteamOrderBookFetcher:
     # ------------------------------------------------------------------
 
     def _request(self, url: str, params, extra_headers: dict = None) -> object:
-        """Issue an HTTP GET with random UA, optional proxy, and 429 back-off.
+        """Delegate to :class:`SteamHttpClient` — preserved for backward compatibility.
 
         Args:
             url: Request URL.
             params: Query-string parameters dict, or ``None``.
-            extra_headers: Additional headers to merge into the request
-                (e.g. browser-like headers for HTML pages).
+            extra_headers: Additional headers merged into the request.
 
         Returns:
             ``requests.Response`` with ``status_code == 200``.
@@ -221,54 +317,7 @@ class SteamOrderBookFetcher:
         Raises:
             RuntimeError: After exhausting retries, or on non-429 errors.
         """
-        if requests is None:  # pragma: no cover
-            raise ImportError("requests is required: pip install requests")
-
-        ua = random.choice(_USER_AGENTS)
-        headers = {"User-Agent": ua}
-        if extra_headers:
-            headers.update(extra_headers)
-        proxy_cfg = None
-        if self._proxies:
-            proxy_url = random.choice(self._proxies)
-            proxy_cfg = {"http": proxy_url, "https": proxy_url}
-
-        for attempt in range(1, _RETRY_MAX + 2):  # up to _RETRY_MAX retries
-            try:
-                resp = self._session.get(
-                    url,
-                    params=params,
-                    headers=headers,
-                    proxies=proxy_cfg,
-                    timeout=15,
-                )
-            except Exception as exc:
-                raise RuntimeError(f"Network error fetching {url!r}: {exc}") from exc
-
-            if resp.status_code == 429:
-                if attempt > _RETRY_MAX:
-                    raise RuntimeError(
-                        f"HTTP 429 rate-limited after {_RETRY_MAX} retries: {url!r}"
-                    )
-                wait = _RETRY_BASE_S * attempt
-                logger.warning(
-                    "HTTP 429 on attempt %d/%d, sleeping %ds …",
-                    attempt, _RETRY_MAX, wait,
-                )
-                time.sleep(wait)
-                continue
-
-            try:
-                resp.raise_for_status()
-            except Exception as exc:
-                raise RuntimeError(
-                    f"HTTP {resp.status_code} fetching {url!r}: {exc}"
-                ) from exc
-
-            return resp
-
-        # Should never be reached
-        raise RuntimeError(f"Exhausted retries for {url!r}")  # pragma: no cover
+        return self._http_client.get(url, params, extra_headers)
 
     @staticmethod
     def _parse_order_book(item_name: str, raw: dict) -> OrderBookSnapshot:

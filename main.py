@@ -105,7 +105,16 @@ class QuantOrchestrator:
         """Resolve nameids, open DB, send startup notification."""
         logger.info("=== QuantOrchestrator starting up ===")
 
-        # Phase 1 — resolve item nameids into cache
+        # Phase 1 — pre-inject nameids that are already known from config
+        #           (avoids unnecessary HTML scraping for fully-configured items)
+        known_ids = {
+            name: int(nameid_str)
+            for nameid_str, name in self._target_items.items()
+        }
+        written = self._fetcher._cache.load_from_dict(known_ids)
+        logger.info("Pre-injected %d nameid(s) from config into cache.", written)
+
+        # Phase 1b — resolve any items whose nameid is still unknown (scraping fallback)
         item_names = list(self._target_items.values())
         logger.info("Resolving nameids for %d item(s)…", len(item_names))
         result = self._initializer.run(item_names)

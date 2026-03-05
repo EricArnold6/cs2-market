@@ -12,6 +12,7 @@ Run with:
 import random
 import math
 import tempfile
+from pathlib import Path
 from unittest.mock import MagicMock
 from src.acquisition.models import ItemHistory, PriceRecord
 from src.analysis.market_maker import market_maker_score

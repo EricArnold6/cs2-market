@@ -11,6 +11,7 @@ from datetime import datetime, timezone, timedelta
 
 import pandas as pd
 from sklearn.ensemble import IsolationForest
+from sqlalchemy import create_engine, text
 
 from src.storage.database import DatabaseConnection
 from src.analysis.anomaly.features import engineer_features
@@ -19,11 +20,12 @@ from src.analysis.anomaly.features import engineer_features
 _MIN_ROWS = 12          # driven by price_momentum_dev warm-up (rolling-12)
 _FEATURE_COLS = ["obi", "spread_ratio", "sdr", "price_momentum_dev"]
 
+# 使用 SQLAlchemy 标准的命名占位符 (:参数名) 替代 psycopg2 的 %s
 _SQL = """
     SELECT time, lowest_ask_price, highest_bid_price,
            ask_volume_top5, bid_volume_top5, total_sell_orders, total_buy_orders
     FROM order_book_snapshots
-    WHERE item_nameid = %s AND time >= %s
+    WHERE item_nameid = :item_nameid AND time >= :cutoff
     ORDER BY time ASC
 """
 
@@ -41,6 +43,14 @@ class MarketAnomalyDetector:
     def __init__(self, db_config: dict) -> None:
         self._db = DatabaseConnection(db_config)
 
+        # 组装 SQLAlchemy 标准的连接 URI
+        user = db_config.get("user")
+        password = db_config.get("password")
+        host = db_config.get("host")
+        port = db_config.get("port", 5432)
+        dbname = db_config.get("dbname")
+        self._engine_uri = f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{dbname}"
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -48,8 +58,8 @@ class MarketAnomalyDetector:
     def fetch_recent_data(self, item_nameid: int, hours: int = 24) -> pd.DataFrame:
         """Query the last *hours* hours of snapshots for *item_nameid*.
 
-        The connection is opened lazily and is idempotent — safe to call
-        multiple times.
+        Safely uses SQLAlchemy engine to prevent Pandas DBAPI2 warnings.
+        The engine is created lazily and disposed of properly.
 
         Returns
         -------
@@ -58,13 +68,21 @@ class MarketAnomalyDetector:
             ask_volume_top5, bid_volume_top5, total_sell_orders,
             total_buy_orders.  May be empty if no data exist.
         """
-        self._db.connect()
         cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=hours)
-        return pd.read_sql_query(
-            _SQL,
-            self._db.connection,
-            params=(item_nameid, cutoff),
-        )
+
+        # 实例化数据库引擎
+        engine = create_engine(self._engine_uri)
+        try:
+            # 使用安全上下文管理器建立连接并读取数据
+            with engine.connect() as conn:
+                return pd.read_sql_query(
+                    text(_SQL),
+                    conn,
+                    params={"item_nameid": item_nameid, "cutoff": cutoff},
+                )
+        finally:
+            # 释放连接池资源
+            engine.dispose()
 
     def engineer_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Delegate to the module-level pure function."""
@@ -91,6 +109,11 @@ class MarketAnomalyDetector:
                   ``"DUMP_RISK"``, or ``"IRREGULAR"``
         """
         df_raw = self.fetch_recent_data(item_nameid)
+
+        # 拦截空数据，防止特征工程报错
+        if df_raw.empty:
+            return None
+
         df_feat = self.engineer_features(df_raw)
         df_feat["time"] = df_raw["time"].values
 
