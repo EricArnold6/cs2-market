@@ -1,12 +1,11 @@
 """
-Unit tests for src/data/fetcher.py and src/data/scheduler.py.
+Unit tests for src/acquisition/fetcher.py and related acquisition modules.
 
 All tests use unittest.mock exclusively — no real HTTP requests are made.
 """
 
 import json
 import tempfile
-import threading
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch, call
@@ -22,7 +21,6 @@ from src.acquisition.http_client import (
 from src.acquisition.cache import _NameIdCache
 from src.acquisition.initializer import NameIdInitializer, InitResult
 from src.acquisition.models import OrderBook
-from src.acquisition.scheduler import PollingScheduler
 
 # ---------------------------------------------------------------------------
 # Shared fixtures / fake data
@@ -371,70 +369,6 @@ class TestOrderBookProperties:
         ob_no_bid = self._make_ob(ask=10.00, bid=0.0)
         assert ob_no_bid.spread == 0.0
         assert ob_no_bid.mid_price == 0.0
-
-
-# ===========================================================================
-# Group G — PollingScheduler (5 tests)
-# ===========================================================================
-
-class TestPollingScheduler:
-
-    def _make_scheduler(self, tmp_cache, mock_session, callback=None):
-        f = SteamOrderBookFetcher(session=mock_session, cache=tmp_cache)
-        tmp_cache.set("AK-47 | Redline (Field-Tested)", 176923345)
-        return PollingScheduler(
-            fetcher=f,
-            item_names=["AK-47 | Redline (Field-Tested)"],
-            interval_seconds=1.0,
-            on_snapshot=callback,
-        )
-
-    def test_callback_is_called(self, tmp_cache, mock_session):
-        """on_snapshot callback must be called after poll_once."""
-        received = []
-        sched = self._make_scheduler(tmp_cache, mock_session, callback=received.append)
-        with patch("src.acquisition.http_client.time.sleep"):
-            sched.poll_once()
-        assert len(received) == 1
-
-    def test_poll_once_returns_list(self, tmp_cache, mock_session):
-        """poll_once must return a list of OrderBook objects."""
-        sched = self._make_scheduler(tmp_cache, mock_session)
-        with patch("src.acquisition.http_client.time.sleep"):
-            result = sched.poll_once()
-        assert isinstance(result, list)
-        assert len(result) == 1
-        assert isinstance(result[0], OrderBook)
-
-    def test_stop_event_exits_run_forever(self, tmp_cache, mock_session):
-        """Setting stop_event must cause run_forever to exit within a few seconds."""
-        sched = self._make_scheduler(tmp_cache, mock_session)
-        stop = threading.Event()
-
-        def _run():
-            sched.run_forever(stop_event=stop)
-
-        with patch("src.acquisition.http_client.time.sleep"), \
-             patch("src.acquisition.scheduler.time.sleep"):
-            t = threading.Thread(target=_run, daemon=True)
-            t.start()
-            time.sleep(0.1)
-            stop.set()
-            t.join(timeout=5.0)
-        assert not t.is_alive(), "run_forever did not exit after stop_event was set"
-
-    def test_initial_last_poll_time_is_none(self, tmp_cache, mock_session):
-        """Before any poll, last_poll_time must be None."""
-        sched = self._make_scheduler(tmp_cache, mock_session)
-        assert sched.last_poll_time is None
-
-    def test_last_poll_time_updated_after_poll(self, tmp_cache, mock_session):
-        """After poll_once, last_poll_time must be a positive float."""
-        sched = self._make_scheduler(tmp_cache, mock_session)
-        with patch("src.acquisition.http_client.time.sleep"):
-            sched.poll_once()
-        assert sched.last_poll_time is not None
-        assert sched.last_poll_time > 0
 
 
 # ===========================================================================

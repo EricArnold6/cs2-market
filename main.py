@@ -18,6 +18,8 @@ import sys
 import time
 from pathlib import Path
 
+import psycopg2
+
 # ---------------------------------------------------------------------------
 # Logging setup — must happen before any src.* imports that use loggers
 # ---------------------------------------------------------------------------
@@ -78,14 +80,6 @@ class QuantOrchestrator:
         # target_items: {"nameid_str": "item_name", ...}
         self._target_items: dict[str, str] = cfg["target_items"]
 
-        # Alerting
-        dt_cfg = cfg["dingtalk"]
-        self._alerter = DingTalkAlerter(
-            webhook_url=dt_cfg["webhook_url"],
-            secret=dt_cfg.get("secret"),
-        )
-        self._dispatcher = AlertDispatcher(self._alerter)
-
         # Acquisition
         self._fetcher = SteamOrderBookFetcher()
         self._initializer = NameIdInitializer(self._fetcher)
@@ -96,6 +90,14 @@ class QuantOrchestrator:
 
         # Anomaly detection (shares the same DB config)
         self._detector = MarketAnomalyDetector(self._db_config)
+
+        # Alerting
+        dt_cfg = cfg["dingtalk"]
+        self._alerter = DingTalkAlerter(
+            webhook_url=dt_cfg["webhook_url"],
+            secret=dt_cfg.get("secret"),
+        )
+        self._dispatcher = AlertDispatcher(self._alerter)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -166,19 +168,27 @@ class QuantOrchestrator:
         while True:
             try:
                 self._scan_all_items(sleep_min, sleep_max)
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("Fatal error in scan cycle: %s", exc)
-                try:
-                    self._alerter.send_text(
-                        f"⚠️ CS2 Monitor 出现错误，60秒后重试：{exc}"
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
+            except psycopg2.Error as db_exc:
+                # 专门处理数据库断线/接口异常，触发自愈重连
+                logger.exception("Database error occurred during scan: %s", db_exc)
+                self._send_alert_safe(
+                    f"⚠️ CS2 Monitor 数据库异常，正在尝试自愈：{db_exc}"
+                )
+                self._recover_database()
                 time.sleep(60)
-                continue
 
-            logger.info("Scan cycle complete. Sleeping %ds…", scan_interval_s)
-            time.sleep(scan_interval_s)
+            except Exception as exc:  # noqa: BLE001
+                # 其他未预期异常（API 超时、数据解析错误、代码 Bug 等）
+                # 不触发数据库重连，只记录日志并等待下次重试
+                logger.exception("Unexpected error in scan cycle: %s", exc)
+                self._send_alert_safe(
+                    f"⚠️ CS2 Monitor 出现未知错误，60秒后重试：{exc}"
+                )
+                time.sleep(60)
+
+            else:
+                logger.info("Scan cycle complete. Sleeping %ds…", scan_interval_s)
+                time.sleep(scan_interval_s)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -190,7 +200,11 @@ class QuantOrchestrator:
         for idx, (nameid_str, item_name) in enumerate(items):
             try:
                 self._process_item(int(nameid_str), item_name)
+            except psycopg2.Error:
+                # 数据库异常必须向上冒泡，交由 run_forever 的专用 handler 处理
+                raise
             except Exception as exc:  # noqa: BLE001
+                # 单品异常（API 超时、解析错误等）只记录日志，不中断整轮扫描
                 logger.error(
                     "Error processing item %r (nameid=%s): %s",
                     item_name, nameid_str, exc,
@@ -236,12 +250,29 @@ class QuantOrchestrator:
         # Step 4 — dispatch alert if warranted
         self._dispatcher.dispatch(item_name, result)
 
+    def _recover_database(self) -> None:
+        """独立的数据库自愈逻辑：关闭死连接并重新建立连接。"""
+        logger.info("Attempting to re-establish database connection...")
+        try:
+            self._db.close()
+            self._db.connect()
+            self._repo = OrderBookRepository(self._db.connection)
+            logger.info("Database connection successfully recovered.")
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Failed to recover database connection: %s", exc)
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
+    def _send_alert_safe(self, message: str) -> None:
+        """安全发送告警——不会抛出异常，但告警失败时记录 error 日志。"""
+        try:
+            self._alerter.send_text(message)
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "Failed to send alert. Message: %r, Error: %s", message, exc
+            )
 
-def main() -> None:
+    # ---------------------------------------------------------------------------
+    # Entry point
+    # ---------------------------------------------------------------------------
     orchestrator = QuantOrchestrator()
     try:
         orchestrator.startup()

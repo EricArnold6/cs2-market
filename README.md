@@ -34,7 +34,7 @@ The library detects **market maker (盘主) activity** — large traders who dri
 | Module | Description |
 |--------|-------------|
 | `src/schemas/market.py` | `OrderBookSnapshot` — system-wide canonical data contract |
-| `src/acquisition/` | Steam order-book fetcher, nameid cache, batch initializer, polling scheduler |
+| `src/acquisition/` | Steam order-book fetcher, nameid cache, batch initializer |
 | `src/analysis/indicators.py` | SMA, EMA, RSI, MACD, Bollinger Bands, volume ratio |
 | `src/analysis/market_maker.py` | Volume spike, price momentum, BB breakout, composite MM score |
 | `src/strategy/signal.py` | `generate_signals()` / `latest_signal()` → BUY / SELL / HOLD |
@@ -69,8 +69,7 @@ cs2-market/
 │   │   ├── cache.py                   _NameIdCache（持久化 JSON 缓存）
 │   │   ├── http_client.py             SteamHttpClient, SteamOrderBookFetcher
 │   │   ├── initializer.py             NameIdInitializer, InitResult
-│   │   ├── fetcher.py                 MarketDataFetcher（CNY）+ 向后兼容 re-export hub
-│   │   └── scheduler.py               PollingScheduler
+│   │   └── fetcher.py                 MarketDataFetcher（CNY）+ 向后兼容 re-export hub
 │   │
 │   ├── storage/                       ══ 模块二：数据存储 ══
 │   │   ├── __init__.py
@@ -126,11 +125,11 @@ cs2-market/
 │  (UA pool, retry, rate-limit)                                        │  │
 │        │                                                             │  │
 │        ▼                                                             ▼  │
-│  PollingScheduler                                          OrderBookRepository
-│  (750 s interval)                                          (PostgreSQL)     │
+│  QuantOrchestrator                                         OrderBookRepository
+│  run_forever() → _scan_all_items()                         (PostgreSQL)     │
 │        │                                                             │  │
 │        ▼                                                             │  │
-│  on_snapshot callback                                                │  │
+│  _process_item()                                                     │  │
 │        │                                                             │  │
 │        ├──► MarketAnomalyDetector ◄────────── fetch_recent_data() ──┘  │
 │        │    (Isolation Forest)                                          │
@@ -292,12 +291,13 @@ The acquisition pipeline is **two-phase**: first resolve item nameids (once), th
 ┌──────────────────────────────────────────────────────────┐
 │  Phase 2: Polling (runs forever)                         │
 │                                                          │
-│  PollingScheduler.run_forever(stop_event)                │
-│    └─ every 750 s → poll_once()                          │
-│         └─ SteamOrderBookFetcher.fetch_multiple()        │
-│              └─ fetch_order_book(item_name)              │
-│                   ├─ cache.get(item_name) → nameid       │
-│                   └─ JSON API → OrderBookSnapshot        │
+│  QuantOrchestrator.run_forever(stop_event)               │
+│    └─ every 750 s → _scan_all_items()                    │
+│         └─ _process_item(item_name)                      │
+│              ├─ SteamOrderBookFetcher.fetch_order_book() │
+│              ├─ OrderBookRepository.insert_snapshot()    │
+│              ├─ MarketAnomalyDetector.detect_anomalies() │
+│              └─ AlertDispatcher.dispatch()               │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -305,7 +305,7 @@ The acquisition pipeline is **two-phase**: first resolve item nameids (once), th
 
 ```python
 import threading
-from src.acquisition import SteamOrderBookFetcher, NameIdInitializer, PollingScheduler
+from src.acquisition import SteamOrderBookFetcher, NameIdInitializer
 
 ITEMS = [
     "AK-47 | Redline (Field-Tested)",
@@ -322,19 +322,9 @@ if not result.all_succeeded:
 
 print(f"Init: {len(result.from_cache)} cache hits, {len(result.resolved)} resolved")
 
-# Phase 2: Start polling loop in a background thread
-def on_snapshot(snapshots):
-    for ob in snapshots:
-        print(f"{ob.item_name}: ask=${ob.lowest_ask_price:.2f} bid=${ob.highest_bid_price:.2f}")
-
-stop = threading.Event()
-sched = PollingScheduler(fetcher, ITEMS, on_snapshot=on_snapshot)
-t = threading.Thread(target=sched.run_forever, kwargs={"stop_event": stop}, daemon=True)
-t.start()
-
-# ... some time later ...
-stop.set()
-t.join()
+# Phase 2: Run the full pipeline via QuantOrchestrator (main.py)
+# QuantOrchestrator.run_forever() drives _scan_all_items() → _process_item()
+# combining order-book fetching, anomaly detection, PostgreSQL storage, and alerting.
 ```
 
 #### Offline pre-injection: `_NameIdCache.load_from_dict()`
@@ -790,7 +780,7 @@ Returns `True` on success (HTTP 200 + `errcode == 0`), `False` on any error.
 ### Canonical paths (use these in new code)
 
 ```python
-from src.acquisition import SteamOrderBookFetcher, NameIdInitializer, PollingScheduler
+from src.acquisition import SteamOrderBookFetcher, NameIdInitializer
 from src.acquisition.models import PriceRecord, ItemHistory, TradeSignal
 from src.acquisition.cache import _NameIdCache
 from src.schemas.market import OrderBookSnapshot
@@ -831,7 +821,7 @@ python -m pytest tests/test_indicators.py::TestSMA::test_sma_basic -v
 .venv\Scripts\python -m pytest tests/ -v
 ```
 
-The test suite has **166 tests** covering all modules. All database and network I/O is mocked with `MagicMock` — no real connections are needed to run the tests.
+The test suite has **161 tests** covering all modules. All database and network I/O is mocked with `MagicMock` — no real connections are needed to run the tests.
 
 Test file map:
 
@@ -839,7 +829,7 @@ Test file map:
 |------|--------|
 | `test_indicators.py` | SMA, EMA, RSI, MACD, Bollinger Bands, volume ratio |
 | `test_market_maker.py` | Volume spike, momentum, BB breakout, composite score |
-| `test_fetcher.py` | `SteamOrderBookFetcher`, `NameIdInitializer`, `PollingScheduler`, `_NameIdCache` |
+| `test_fetcher.py` | `SteamOrderBookFetcher`, `NameIdInitializer`, `_NameIdCache` |
 | `test_storage.py` | `DatabaseConnection`, `OrderBookRepository` |
 | `test_backtest.py` | `run_backtest()`, `Trade`, `BacktestResult` |
 | `test_anomaly.py` | `engineer_features()`, `MarketAnomalyDetector` |

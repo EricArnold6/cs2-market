@@ -325,14 +325,12 @@ class SteamOrderBookFetcher:
 
         This is a pure function with no side-effects.  Missing fields are
         silently replaced with zeros to avoid crashes on partial responses.
-
-        Args:
-            item_name: The item this snapshot belongs to.
-            raw: Parsed JSON dict from the Steam API.
-
-        Returns:
-            A fully populated :class:`~src.schemas.market.OrderBookSnapshot`.
+        Uses a multi-fallback strategy to reliably extract total order counts,
+        even for non-commodity items (e.g. weapon skins) where the summary
+        fields are omitted by the Steam API.
         """
+        import re  # 确保在这里引入了 re
+
         sell_graph = raw.get("sell_order_graph", [])
         buy_graph = raw.get("buy_order_graph", [])
 
@@ -351,11 +349,39 @@ class SteamOrderBookFetcher:
                     pass
             return total
 
-        def _total_orders(raw_dict, key):
-            try:
-                return int(str(raw_dict[key]).replace(",", ""))
-            except (KeyError, ValueError, TypeError):
-                return 0
+        # ================= 替换为三重兜底提取逻辑 =================
+        def _robust_total_orders(raw_dict: dict, count_key: str, summary_key: str, graph: list) -> int:
+            candidates = [0]
+
+            # 1. 尝试常规 count
+            val = raw_dict.get(count_key)
+            if val is not None:
+                try:
+                    candidates.append(int(str(val).replace(",", "")))
+                except ValueError:
+                    pass
+
+            # 2. 尝试从 summary HTML 中正则提取
+            summary_html = raw_dict.get(summary_key, "")
+            if summary_html:
+                clean_text = re.sub(r'<[^>]+>', '', str(summary_html))
+                match = re.search(r'([\d,]+)', clean_text)
+                if match:
+                    try:
+                        candidates.append(int(match.group(1).replace(",", "")))
+                    except ValueError:
+                        pass
+
+            # 3. 终极兜底：直接取图表末尾的累计数量（这是武器皮肤的唯一救星）
+            if isinstance(graph, list) and len(graph) > 0:
+                try:
+                    candidates.append(int(graph[-1][1]))
+                except (IndexError, ValueError):
+                    pass
+
+            return max(candidates)
+
+        # ========================================================
 
         return OrderBookSnapshot(
             item_name=item_name,
@@ -364,6 +390,7 @@ class SteamOrderBookFetcher:
             highest_bid_price=_price(buy_graph, 0),
             ask_volume_top5=_vol_top5(sell_graph),
             bid_volume_top5=_vol_top5(buy_graph),
-            total_sell_orders=_total_orders(raw, "sell_order_count"),
-            total_buy_orders=_total_orders(raw, "buy_order_count"),
+            # 修改调用，传入需要的三把钥匙
+            total_sell_orders=_robust_total_orders(raw, "sell_order_count", "sell_order_summary", sell_graph),
+            total_buy_orders=_robust_total_orders(raw, "buy_order_count", "buy_order_summary", buy_graph),
         )

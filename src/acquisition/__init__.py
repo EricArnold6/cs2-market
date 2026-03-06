@@ -8,7 +8,6 @@ from .models import PriceRecord, ItemHistory, TradeSignal, OrderBook
 from .http_client import SteamOrderBookFetcher, SteamHttpClient
 from .fetcher import MarketDataFetcher
 from .initializer import NameIdInitializer, InitResult
-from .scheduler import PollingScheduler
 from .exceptions import NameIdExtractionError, NameIdNotInitializedError
 from .cache import _NameIdCache
 from src.schemas.market import OrderBookSnapshot
@@ -24,7 +23,6 @@ __all__ = [
     "MarketDataFetcher",
     "NameIdInitializer",
     "InitResult",
-    "PollingScheduler",
     "NameIdExtractionError",
     "NameIdNotInitializedError",
     "_NameIdCache",
