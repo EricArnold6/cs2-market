@@ -65,6 +65,18 @@ class OrderBookRepository:
 
         return len(rows)
 
+    def get_snapshot_count(self, item_nameid: int) -> int:
+        """Return the total number of stored snapshots for an item."""
+        sql = """
+            SELECT COUNT(*)
+            FROM order_book_snapshots
+            WHERE item_nameid = %s
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(sql, (item_nameid,))
+            row = cur.fetchone()
+        return row[0] if row else 0
+
     def get_latest_snapshot(self, item_nameid: int) -> dict | None:
         """Return the most recent snapshot for an item, or None."""
         sql = """

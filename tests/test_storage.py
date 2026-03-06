@@ -286,3 +286,42 @@ class TestGetLatestSnapshot:
         repo.get_latest_snapshot(1)
         sql = mock_cur.execute.call_args[0][0]
         assert "ORDER BY time DESC" in sql
+
+
+# ---------------------------------------------------------------------------
+# TestGetSnapshotCount
+# ---------------------------------------------------------------------------
+
+class TestGetSnapshotCount:
+
+    def _make_repo_with_fetchone(self, row):
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_cur.fetchone.return_value = row
+        mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cur)
+        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        return OrderBookRepository(mock_conn), mock_cur
+
+    def test_returns_zero_when_no_rows(self):
+        repo, _ = self._make_repo_with_fetchone((0,))
+        assert repo.get_snapshot_count(42) == 0
+
+    def test_returns_correct_count(self):
+        repo, _ = self._make_repo_with_fetchone((17,))
+        assert repo.get_snapshot_count(42) == 17
+
+    def test_returns_zero_when_fetchone_is_none(self):
+        repo, _ = self._make_repo_with_fetchone(None)
+        assert repo.get_snapshot_count(99) == 0
+
+    def test_query_filters_by_item_nameid(self):
+        repo, mock_cur = self._make_repo_with_fetchone((5,))
+        repo.get_snapshot_count(123)
+        args = mock_cur.execute.call_args[0][1]
+        assert args[0] == 123
+
+    def test_query_contains_count_star(self):
+        repo, mock_cur = self._make_repo_with_fetchone((0,))
+        repo.get_snapshot_count(1)
+        sql = mock_cur.execute.call_args[0][0]
+        assert "COUNT(*)" in sql
