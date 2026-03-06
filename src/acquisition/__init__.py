@@ -6,7 +6,6 @@ Public API re-exports for the acquisition package.
 
 from .models import PriceRecord, ItemHistory, TradeSignal, OrderBook
 from .http_client import SteamOrderBookFetcher, SteamHttpClient
-from .fetcher import MarketDataFetcher
 from .initializer import NameIdInitializer, InitResult
 from .exceptions import NameIdExtractionError, NameIdNotInitializedError
 from .cache import _NameIdCache
@@ -20,7 +19,6 @@ __all__ = [
     "OrderBookSnapshot",
     "SteamHttpClient",
     "SteamOrderBookFetcher",
-    "MarketDataFetcher",
     "NameIdInitializer",
     "InitResult",
     "NameIdExtractionError",

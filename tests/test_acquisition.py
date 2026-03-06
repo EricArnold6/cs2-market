@@ -1,5 +1,5 @@
 """
-Unit tests for src/acquisition/fetcher.py and related acquisition modules.
+Unit tests for src/acquisition — http_client, cache, initializer, models.
 
 All tests use unittest.mock exclusively — no real HTTP requests are made.
 """

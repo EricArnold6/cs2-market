@@ -82,9 +82,8 @@ class SteamHttpClient:
     """Thin network shield: UA rotation, proxy dispatch, 429 exponential back-off.
 
     This class has **no knowledge** of Steam API semantics — it only handles
-    the transport concerns.  Business-layer classes (e.g. :class:`SteamOrderBookFetcher`
-    and :class:`~src.acquisition.fetcher.MarketDataFetcher`) depend on this via
-    constructor injection, enabling easy unit-testing with a mock session.
+    the transport concerns.  Business-layer classes (e.g. :class:`SteamOrderBookFetcher`)
+    depend on this via constructor injection, enabling easy unit-testing with a mock session.
 
     Args:
         proxies: Optional list of proxy URLs; one is chosen at random per

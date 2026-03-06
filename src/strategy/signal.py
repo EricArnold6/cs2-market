@@ -13,7 +13,7 @@ A BUY signal is generated when ALL of the following are true:
    direction is ``"LONG"`` (i.e. a large buyer is accumulating).
 2. RSI is not yet overbought (< *rsi_overbought*).
 3. The MACD histogram is positive (momentum is upward).
-4. The price is near or below the Bollinger middle band (not already extended).
+4. The price is above the Bollinger middle band (momentum confirmed).
 
 A SELL signal is generated when ALL of the following are true:
 
@@ -21,7 +21,7 @@ A SELL signal is generated when ALL of the following are true:
    ``"SHORT"`` (a large seller is distributing).
 2. RSI is not yet oversold (> *rsi_oversold*).
 3. The MACD histogram is negative.
-4. The price is near or above the Bollinger middle band.
+4. The price is below the Bollinger middle band (downtrend confirmed).
 
 Otherwise a HOLD signal is returned.
 """
