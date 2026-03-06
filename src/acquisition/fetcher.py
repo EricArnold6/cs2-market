@@ -19,7 +19,8 @@ import calendar
 import logging
 import time
 import warnings
-from typing import List, Optional
+import re
+from typing import List, Optional, Dict
 
 try:
     import requests
@@ -49,7 +50,6 @@ from src.acquisition.http_client import (  # noqa: F401
 )
 from src.acquisition.initializer import NameIdInitializer, InitResult  # noqa: F401
 from src.acquisition.models import ItemHistory, PriceRecord, OrderBook  # noqa: F401
-from src.schemas.market import OrderBookSnapshot  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -61,24 +61,8 @@ logger = logging.getLogger(__name__)
 class MarketDataFetcher:
     """Steam-specific order-book fetcher — business layer only, no network logic.
 
-    Encapsulates Steam CNY parameters (``currency=23``, ``country=CN``,
-    ``language=schinese``), URL assembly, and JSON-to-:class:`OrderBookSnapshot`
-    parsing.  All network I/O is delegated to the injected
-    :class:`~src.acquisition.http_client.SteamHttpClient`.
-
-    Typical usage::
-
-        from src.acquisition.http_client import SteamHttpClient
-        from src.acquisition.fetcher import MarketDataFetcher
-
-        client = SteamHttpClient()
-        fetcher = MarketDataFetcher(client)
-        snapshot = fetcher.fetch_order_book(item_nameid=176923345, item_name="AK-47 | Redline (Field-Tested)")
-
-    Args:
-        http_client: A :class:`~src.acquisition.http_client.SteamHttpClient`
-                     (or any duck-typed object exposing a compatible ``.get()``
-                     method) that handles transport concerns.
+    Encapsulates Steam CNY parameters, URL assembly, and JSON parsing.
+    All network I/O is delegated to the injected SteamHttpClient.
     """
 
     API_URL = "https://steamcommunity.com/market/itemordershistogram"
@@ -87,28 +71,11 @@ class MarketDataFetcher:
         self._client = http_client
 
     def fetch_order_book(
-        self,
-        item_nameid: int,
-        item_name: str = "",
-    ) -> Optional[OrderBookSnapshot]:
-        """Fetch a single order-book snapshot from the Steam Market.
-
-        Uses CNY market parameters (currency=23, country=CN, language=schinese).
-
-        Args:
-            item_nameid: The Steam internal item nameid (integer).
-            item_name: Human-readable market hash name used to populate
-                :attr:`~src.schemas.market.OrderBookSnapshot.item_name`.
-                Defaults to an empty string if not provided.
-
-        Returns:
-            A populated :class:`~src.schemas.market.OrderBookSnapshot`, or
-            ``None`` if the API response indicates failure (``success != 1``).
-
-        Raises:
-            RuntimeError: On network errors or after exhausting retries (raised
-                by the underlying :class:`~src.acquisition.http_client.SteamHttpClient`).
-        """
+            self,
+            item_nameid: int,
+            item_name: str = "",
+    ) -> Optional[Dict]:
+        """Fetch a single order-book snapshot from the Steam Market."""
         params = {
             "item_nameid": item_nameid,
             "currency": 23,
@@ -116,33 +83,91 @@ class MarketDataFetcher:
             "language": "schinese",
             "two_factor": 0,
         }
-        resp = self._client.get(self.API_URL, params=params)
-        raw = resp.json()
-        if raw.get("success") != 1:
-            logger.warning(
-                "Steam API returned non-success for item_nameid=%d: %r",
-                item_nameid,
-                raw.get("success"),
-            )
+
+        # 兼容不同 client 封装的 get 方法
+        if hasattr(self._client, 'safe_get'):
+            resp = self._client.safe_get(self.API_URL, params=params)
+        else:
+            resp = self._client.get(self.API_URL, params=params)
+
+        if not resp:
             return None
-        return self._parse_histogram_data(raw, item_name)
 
-    @staticmethod
-    def _parse_histogram_data(raw: dict, item_name: str) -> Optional[OrderBookSnapshot]:
-        """Parse ``itemordershistogram`` JSON into an :class:`OrderBookSnapshot`.
+        try:
+            raw = resp.json()
+        except ValueError:
+            logger.error(f"Failed to decode JSON for item {item_nameid}")
+            return None
 
-        Delegates to the same proven parsing logic used by
-        :meth:`~src.acquisition.http_client.SteamOrderBookFetcher._parse_order_book`.
-        Missing or malformed fields are silently replaced with zeros.
+        if raw.get("success") != 1:
+            logger.warning(f"Steam API returned non-success for item_nameid={item_nameid}")
+            return None
 
-        Args:
-            raw: Parsed JSON dict from the Steam histogram API.
-            item_name: Human-readable item name for the returned snapshot.
+        return self._parse_histogram_data(raw, item_nameid)
 
-        Returns:
-            A fully populated :class:`~src.schemas.market.OrderBookSnapshot`.
-        """
-        return SteamOrderBookFetcher._parse_order_book(item_name, raw)
+    def _parse_histogram_data(self, raw_data: Dict, item_nameid: int) -> Dict:
+        """核心清洗逻辑：将图表坐标点转化为量化所需的 5 档盘口因子"""
+        try:
+            asks = raw_data.get('sell_order_graph', [])
+            bids = raw_data.get('buy_order_graph', [])
+
+            top_5_asks = asks[:5] if len(asks) >= 5 else asks
+            top_5_bids = bids[:5] if len(bids) >= 5 else bids
+
+            snapshot = {
+                "item_nameid": item_nameid,
+                "timestamp": int(time.time()),
+
+                "lowest_ask_price": float(top_5_asks[0][0]) if top_5_asks else None,
+                "highest_bid_price": float(top_5_bids[0][0]) if top_5_bids else None,
+
+                "ask_volume_top5": int(top_5_asks[-1][1]) if top_5_asks else 0,
+                "bid_volume_top5": int(top_5_bids[-1][1]) if top_5_bids else 0,
+
+                # 使用三重兜底提取法，无惧 V社 隐藏字段
+                "total_sell_orders": self._extract_total(raw_data, 'sell_order_summary', 'sell_order_count', 'sell_order_graph'),
+                "total_buy_orders": self._extract_total(raw_data, 'buy_order_summary', 'buy_order_count', 'buy_order_graph')
+            }
+            return snapshot
+
+        except Exception as e:
+            logger.error(f"清洗订单簿数据时发生未知错误: {e} | ID: {item_nameid}")
+            return {}
+
+    def _extract_total(self, raw_data: Dict, summary_key: str, count_key: str, graph_key: str) -> int:
+        """三重兜底提取总单量，兼容不同饰品类型（消耗品 vs 武器皮肤）"""
+
+        # 1. 尝试直接获取数字键
+        if count_key in raw_data and raw_data[count_key]:
+            try:
+                return int(str(raw_data[count_key]).replace(',', ''))
+            except ValueError:
+                pass
+
+        # 2. 尝试从 HTML 摘要正则提取
+        summary_html = raw_data.get(summary_key, '')
+        if summary_html:
+            clean_text = re.sub(r'<[^>]+>', '', str(summary_html))
+            match = re.search(r'([\d,]+)', clean_text)
+            if match:
+                try:
+                    return int(match.group(1).replace(',', ''))
+                except ValueError:
+                    pass
+
+        # 3. 终极兜底：由于武器皮肤的 API 不返回 summary，
+        # 我们直接取图表数组的最后一个节点的累计挂单量。
+        # 这是量化分析中最可靠的“盘口可见深度”数据。
+        graph = raw_data.get(graph_key, [])
+        if graph and len(graph) > 0:
+            try:
+                # graph 的每一项是 [price, cumulative_volume, description]
+                # 取最后一个元素的 cumulative_volume
+                return int(graph[-1][1])
+            except (IndexError, ValueError):
+                pass
+
+        return 0
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +186,6 @@ _REQUEST_DELAY = 3.0
 # ---------------------------------------------------------------------------
 
 def _parse_steam_date(date_str: str) -> float:
-    """Convert a Steam date string like 'Nov 01 2023 01: +0' to a Unix timestamp."""
     parts = date_str.strip().split()
     date_part = " ".join(parts[:3])
     t = time.strptime(date_part, "%b %d %Y")
@@ -169,15 +193,10 @@ def _parse_steam_date(date_str: str) -> float:
 
 
 def fetch_item_history(
-    item_name: str,
-    appid: int = CS2_APP_ID,
-    session: Optional[object] = None,
+        item_name: str,
+        appid: int = CS2_APP_ID,
+        session: Optional[object] = None,
 ) -> ItemHistory:
-    """Fetch price history for a single CS2 item from the Steam Market.
-
-    .. deprecated::
-        Use :class:`SteamOrderBookFetcher` instead.
-    """
     warnings.warn(
         "fetch_item_history() is deprecated; use SteamOrderBookFetcher instead.",
         DeprecationWarning,
@@ -197,28 +216,21 @@ def fetch_item_history(
 
     history = ItemHistory(item_name=item_name)
     for entry in data.get("prices", []):
-        date_str, price_str, vol_str = entry[0], entry[1], entry[2]
         history.records.append(
             PriceRecord(
-                timestamp=_parse_steam_date(date_str),
-                price=float(price_str),
-                volume=int(vol_str),
+                timestamp=_parse_steam_date(entry[0]),
+                price=float(entry[1]),
+                volume=int(entry[2]),
             )
         )
-
     return history
 
 
 def fetch_multiple_items(
-    item_names: List[str],
-    appid: int = CS2_APP_ID,
-    delay: float = _REQUEST_DELAY,
+        item_names: List[str],
+        appid: int = CS2_APP_ID,
+        delay: float = _REQUEST_DELAY,
 ) -> List[ItemHistory]:
-    """Fetch price history for multiple items with a polite delay between requests.
-
-    .. deprecated::
-        Use :class:`SteamOrderBookFetcher` instead.
-    """
     warnings.warn(
         "fetch_multiple_items() is deprecated; use SteamOrderBookFetcher instead.",
         DeprecationWarning,

@@ -69,7 +69,7 @@ cs2-market/
 │   │   ├── cache.py                   _NameIdCache（持久化 JSON 缓存）
 │   │   ├── http_client.py             SteamHttpClient, SteamOrderBookFetcher
 │   │   ├── initializer.py             NameIdInitializer, InitResult
-│   │   ├── fetcher.py                 已废弃函数 + re-export（向后兼容层）
+│   │   ├── fetcher.py                 MarketDataFetcher（CNY）+ 向后兼容 re-export hub
 │   │   └── scheduler.py               PollingScheduler
 │   │
 │   ├── storage/                       ══ 模块二：数据存储 ══
@@ -86,11 +86,11 @@ cs2-market/
 │   │       ├── features.py            engineer_features(df) → 4-column DataFrame
 │   │       └── detector.py            MarketAnomalyDetector（Isolation Forest pipeline）
 │   │
-│   ├── strategy/                      ══ 兼容层：信号生成 ══
+│   ├── strategy/                      ══ 模块五：信号生成 ══
 │   │   ├── __init__.py
 │   │   └── signal.py                  generate_signals(), latest_signal()
 │   │
-│   ├── backtest/                      ══ 兼容层：回测引擎 ══
+│   ├── backtest/                      ══ 模块六：回测引擎 ══
 │   │   ├── __init__.py
 │   │   ├── models.py                  Trade, BacktestResult
 │   │   └── engine.py                  run_backtest()
@@ -100,12 +100,6 @@ cs2-market/
 │   │   ├── bot.py                     DingTalkAlerter（HMAC-SHA256 Webhook）
 │   │   ├── formatter.py               format_anomaly_alert() → DingTalk Markdown payload
 │   │   └── dispatcher.py              AlertDispatcher（过滤 NORMAL，路由异常信号）
-│   │
-│   └── data/                          ══ 兼容层（过渡期保留）══
-│       ├── __init__.py                从 src.acquisition 全量 re-export
-│       ├── fetcher.py                 re-export → src.acquisition.fetcher
-│       ├── models.py                  re-export → src.acquisition.models
-│       └── scheduler.py               re-export → src.acquisition.scheduler
 │
 └── tests/
     ├── test_indicators.py
@@ -817,9 +811,6 @@ from src.alerting.dispatcher import AlertDispatcher
 
 | Old path | Redirects to |
 |----------|--------------|
-| `from src.data.models import ...` | `src.acquisition.models` |
-| `from src.data.fetcher import ...` | `src.acquisition.fetcher` |
-| `from src.data.scheduler import ...` | `src.acquisition.scheduler` |
 | `from src.acquisition.models import OrderBook` | `src.schemas.market.OrderBookSnapshot` |
 
 ---
@@ -840,7 +831,7 @@ python -m pytest tests/test_indicators.py::TestSMA::test_sma_basic -v
 .venv\Scripts\python -m pytest tests/ -v
 ```
 
-The test suite has **123 tests** covering all modules. All database and network I/O is mocked with `MagicMock` — no real connections are needed to run the tests.
+The test suite has **166 tests** covering all modules. All database and network I/O is mocked with `MagicMock` — no real connections are needed to run the tests.
 
 Test file map:
 
