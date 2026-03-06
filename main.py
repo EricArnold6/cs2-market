@@ -137,6 +137,23 @@ class QuantOrchestrator:
                     "Could not register item metadata for %r: %s", item_name, exc
                 )
 
+        # Phase 3b — log existing snapshot counts so that a restart confirms
+        #            previously stored data is still present in the database.
+        total_existing = 0
+        for nameid_str, item_name in self._target_items.items():
+            try:
+                count = self._repo.get_snapshot_count(int(nameid_str))
+                logger.info(
+                    "Existing snapshots in DB for %r (nameid=%s): %d",
+                    item_name, nameid_str, count,
+                )
+                total_existing += count
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Could not read snapshot count for %r: %s", item_name, exc
+                )
+        logger.info("Total existing snapshots across all items: %d", total_existing)
+
         # Phase 4 — send startup ping
         self._alerter.send_text("🟢 CS2 Market Monitor 已启动 (System online)")
         logger.info("Startup complete.")
