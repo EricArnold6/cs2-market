@@ -17,10 +17,10 @@ CREATE TABLE IF NOT EXISTS order_book_snapshots (
     item_nameid        BIGINT      NOT NULL REFERENCES items(item_nameid),
     lowest_ask_price   NUMERIC(10, 2),
     highest_bid_price  NUMERIC(10, 2),
-    ask_volume_top5    INT,
-    bid_volume_top5    INT,
     total_sell_orders  INT,
-    total_buy_orders   INT
+    total_buy_orders   INT,
+    yyyp_sell_price    NUMERIC(10, 2),
+    yyyp_lease_price   NUMERIC(10, 2)
 );
 """
 

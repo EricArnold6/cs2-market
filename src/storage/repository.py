@@ -32,7 +32,8 @@ class OrderBookRepository:
         sql = """
             INSERT INTO order_book_snapshots (
                 time, item_nameid, lowest_ask_price, highest_bid_price,
-                ask_volume_top5, bid_volume_top5, total_sell_orders, total_buy_orders
+                total_sell_orders, total_buy_orders,
+                yyyp_sell_price, yyyp_lease_price
             ) VALUES %s
         """
         with self._conn.cursor() as cur:
@@ -57,7 +58,8 @@ class OrderBookRepository:
         sql = """
             INSERT INTO order_book_snapshots (
                 time, item_nameid, lowest_ask_price, highest_bid_price,
-                ask_volume_top5, bid_volume_top5, total_sell_orders, total_buy_orders
+                total_sell_orders, total_buy_orders,
+                yyyp_sell_price, yyyp_lease_price
             ) VALUES %s
         """
         with self._conn.cursor() as cur:
@@ -69,7 +71,8 @@ class OrderBookRepository:
         """Return the most recent snapshot for an item, or None."""
         sql = """
             SELECT time, item_nameid, lowest_ask_price, highest_bid_price,
-                   ask_volume_top5, bid_volume_top5, total_sell_orders, total_buy_orders
+                   total_sell_orders, total_buy_orders,
+                   yyyp_sell_price, yyyp_lease_price
             FROM order_book_snapshots
             WHERE item_nameid = %s
             ORDER BY time DESC
@@ -84,7 +87,8 @@ class OrderBookRepository:
 
         keys = [
             "time", "item_nameid", "lowest_ask_price", "highest_bid_price",
-            "ask_volume_top5", "bid_volume_top5", "total_sell_orders", "total_buy_orders",
+            "total_sell_orders", "total_buy_orders",
+            "yyyp_sell_price", "yyyp_lease_price",
         ]
         return dict(zip(keys, row))
 
@@ -94,13 +98,15 @@ class OrderBookRepository:
         ts = datetime.fromtimestamp(snapshot.timestamp, tz=timezone.utc)
         ask = snapshot.lowest_ask_price if snapshot.lowest_ask_price != 0.0 else None
         bid = snapshot.highest_bid_price if snapshot.highest_bid_price != 0.0 else None
+        yyyp_sell = snapshot.yyyp_sell_price if snapshot.yyyp_sell_price != 0.0 else None
+        yyyp_lease = snapshot.yyyp_lease_price if snapshot.yyyp_lease_price != 0.0 else None
         return (
             ts,
             item_nameid,
             ask,
             bid,
-            snapshot.ask_volume_top5,
-            snapshot.bid_volume_top5,
             snapshot.total_sell_orders,
             snapshot.total_buy_orders,
+            yyyp_sell,
+            yyyp_lease,
         )

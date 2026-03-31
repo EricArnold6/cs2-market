@@ -1,9 +1,4 @@
-"""Anomaly detection for CS2 order-book snapshots using Isolation Forest.
-
-Detects low-density data points that correspond to unusual market-microstructure
-events (sudden OBI spikes, supply collapses, spread widening) that are
-statistically consistent with market-maker (盘主) activity.
-"""
+"""Anomaly detection with Dynamic Z-Score Thresholds."""
 
 from __future__ import annotations
 
@@ -17,13 +12,22 @@ from src.storage.database import DatabaseConnection
 from src.analysis.anomaly.features import engineer_features
 
 
-_MIN_ROWS = 12          # driven by price_momentum_dev warm-up (rolling-12)
-_FEATURE_COLS = ["obi", "spread_ratio", "sdr", "price_momentum_dev"]
+# 关键修改：因为 SDR 自身需要 6 个周期，再算 Z-Score 又需要 12 个周期
+# 6 + 12 - 1 = 17。为了保险起见，我们将模型预热期延长至 18 个数据点（约 54 分钟）。
+_MIN_ROWS = 18
 
-# 使用 SQLAlchemy 标准的命名占位符 (:参数名) 替代 psycopg2 的 %s
+_FEATURE_COLS = [
+    "obi", "spread_ratio", "sdr", "price_momentum_dev",
+    "platform_spread", "lease_roi", "price_volatility"
+]
+
+# 数据清洗时，需要额外验证这些 Z-Score 是否计算完成
+_EVAL_COLS = _FEATURE_COLS + ["obi_z", "sdr_z", "spread_z"]
+
 _SQL = """
     SELECT time, lowest_ask_price, highest_bid_price,
-           ask_volume_top5, bid_volume_top5, total_sell_orders, total_buy_orders
+           total_sell_orders, total_buy_orders,
+           yyyp_sell_price, yyyp_lease_price
     FROM order_book_snapshots
     WHERE item_nameid = :item_nameid AND time >= :cutoff
     ORDER BY time ASC
@@ -31,19 +35,11 @@ _SQL = """
 
 
 class MarketAnomalyDetector:
-    """Fit an Isolation Forest on recent order-book snapshots and score them.
-
-    Parameters
-    ----------
-    db_config : dict
-        psycopg2 connection keyword arguments (host, dbname, user, password,
-        port, …).
-    """
+    """Fit an Isolation Forest on recent order-book snapshots and score them."""
 
     def __init__(self, db_config: dict) -> None:
         self._db = DatabaseConnection(db_config)
 
-        # 组装 SQLAlchemy 标准的连接 URI
         user = db_config.get("user")
         password = db_config.get("password")
         host = db_config.get("host")
@@ -51,29 +47,11 @@ class MarketAnomalyDetector:
         dbname = db_config.get("dbname")
         self._engine_uri = f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{dbname}"
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     def fetch_recent_data(self, item_nameid: int, hours: int = 24) -> pd.DataFrame:
-        """Query the last *hours* hours of snapshots for *item_nameid*.
-
-        Safely uses SQLAlchemy engine to prevent Pandas DBAPI2 warnings.
-        The engine is created lazily and disposed of properly.
-
-        Returns
-        -------
-        pd.DataFrame
-            Columns: time, lowest_ask_price, highest_bid_price,
-            ask_volume_top5, bid_volume_top5, total_sell_orders,
-            total_buy_orders.  May be empty if no data exist.
-        """
         cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=hours)
 
-        # 实例化数据库引擎
         engine = create_engine(self._engine_uri)
         try:
-            # 使用安全上下文管理器建立连接并读取数据
             with engine.connect() as conn:
                 return pd.read_sql_query(
                     text(_SQL),
@@ -81,43 +59,21 @@ class MarketAnomalyDetector:
                     params={"item_nameid": item_nameid, "cutoff": cutoff},
                 )
         finally:
-            # 释放连接池资源
             engine.dispose()
 
     def engineer_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Delegate to the module-level pure function."""
         return engineer_features(df)
 
     def detect_anomalies(self, item_nameid: int) -> dict | None:
-        """Run the full anomaly-detection pipeline for one item.
-
-        Returns
-        -------
-        dict | None
-            *None* if there is not enough clean data (< ``_MIN_ROWS`` rows
-            after feature engineering and NaN-dropping).
-
-            Otherwise a dict with keys:
-                * ``timestamp``          – ISO-8601 string of the latest row
-                * ``anomaly_score``      – continuous Isolation Forest score
-                  (more negative = more anomalous)
-                * ``obi``
-                * ``spread_ratio``
-                * ``sdr``
-                * ``price_momentum_dev``
-                * ``signal_type``        – ``"NORMAL"``, ``"ACCUMULATION"``,
-                  ``"DUMP_RISK"``, or ``"IRREGULAR"``
-        """
         df_raw = self.fetch_recent_data(item_nameid)
-
-        # 拦截空数据，防止特征工程报错
         if df_raw.empty:
             return None
 
         df_feat = self.engineer_features(df_raw)
         df_feat["time"] = df_raw["time"].values
 
-        df_clean = df_feat.dropna(subset=_FEATURE_COLS).reset_index(drop=True)
+        # 这里使用包含 Z-Score 的新列表来丢弃预热期空值
+        df_clean = df_feat.dropna(subset=_EVAL_COLS).reset_index(drop=True)
         if len(df_clean) < _MIN_ROWS:
             return None
 
@@ -128,25 +84,22 @@ class MarketAnomalyDetector:
             contamination=0.05,
             random_state=42,
         )
-        labels = model.fit_predict(X)           # 1 = normal, -1 = anomaly
-        scores = model.score_samples(X)         # continuous; lower = more anomalous
+        labels = model.fit_predict(X)
+        scores = model.score_samples(X)
 
         last_idx = len(df_clean) - 1
         last_row = df_clean.iloc[last_idx]
         last_label = labels[last_idx]
         last_score = float(scores[last_idx])
-        last_status = last_row[_FEATURE_COLS]
 
         if last_label == -1:
-            signal_type = self._evaluate_signal(last_status)
+            # 修改：将包含 Z-Score 的完整 Series 传给诊断函数
+            signal_type = self._evaluate_signal(last_row)
         else:
             signal_type = "NORMAL"
 
         ts = last_row["time"]
-        if isinstance(ts, pd.Timestamp):
-            timestamp = ts.isoformat()
-        else:
-            timestamp = str(ts)
+        timestamp = ts.isoformat() if isinstance(ts, pd.Timestamp) else str(ts)
 
         return {
             "timestamp": timestamp,
@@ -155,34 +108,43 @@ class MarketAnomalyDetector:
             "spread_ratio": float(last_row["spread_ratio"]),
             "sdr": float(last_row["sdr"]),
             "price_momentum_dev": float(last_row["price_momentum_dev"]),
+            "platform_spread": float(last_row["platform_spread"]),
             "signal_type": signal_type,
         }
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
     def _evaluate_signal(self, status: pd.Series) -> str:
-        """Classify an anomalous row into a market-event label.
+        """Classify anomalous row using dynamic Z-Score and Volatility confirmation."""
 
-        Parameters
-        ----------
-        status : pd.Series
-            Must contain ``obi``, ``spread_ratio``, ``sdr``,
-            ``price_momentum_dev``.
-
-        Returns
-        -------
-        str
-            ``"ACCUMULATION"`` (建仓扫货), ``"DUMP_RISK"`` (撤单/砸盘),
-            or ``"IRREGULAR"``.
-        """
-        sdr = float(status["sdr"])
         obi = float(status["obi"])
+        obi_z = float(status["obi_z"])
+        sdr_z = float(status["sdr_z"])
+        platform_spread = float(status["platform_spread"])
         spread_ratio = float(status["spread_ratio"])
+        volatility = float(status["price_volatility"])
 
-        if sdr > 0.10 and obi > 0.5:
-            return "ACCUMULATION"
-        if obi < -0.6 and spread_ratio > 0.05:
-            return "DUMP_RISK"
+        # 1. 跨平台搬砖信号
+        if platform_spread > 0.05:
+            return "ARBITRAGE_OPPORTUNITY"
+
+        # 2. 终极建仓/突破信号 (ACCUMULATION)
+        # 条件 A: 供应显著萎缩 (sdr_z > 2.0)
+        # 条件 B: 瞬间被扫货 (obi_z > 2.5 且 obi > 0)
+        if sdr_z > 2.0 and obi_z > 2.5 and obi > 0:
+            # --- 增加波动率与价差确认（防左手倒右手假拉升） ---
+            # 如果庄家只是自己挂高价自己买，价格涨了（spread_ratio > 0），
+            # 但其实没人跟风，平时的波动率极大（常常上蹿下跳）。
+            # 真正的建仓突破往往伴随着：平时波动率极低（volatility < 0.05 即 5%），但此刻价格上扬。
+            if spread_ratio >= 0 and volatility < 0.05:
+                return "ACCUMULATION"
+            else:
+                return "IRREGULAR"  # 疑似高波动率的“骗炮”洗盘，降级为普通异动
+
+        # 3. 终极砸盘预警 (DUMP_RISK)
+        # 抛压瞬间激增，且价格实质性下挫
+        if obi_z < -2.5 and obi < 0:
+            if spread_ratio < -0.01:  # 伴随至少 1% 的实质性破位下跌
+                return "DUMP_RISK"
+            else:
+                return "IRREGULAR"  # 光挂单不砸价（可能是压盘），降级
+
         return "IRREGULAR"

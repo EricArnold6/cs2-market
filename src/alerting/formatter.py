@@ -44,8 +44,8 @@ def format_anomaly_alert(item_name: str, result: dict) -> dict:
         Human-readable market hash name, e.g. ``"AK-47 | Redline (Field-Tested)"``.
     result : dict
         Dict returned by ``MarketAnomalyDetector.detect_anomalies()``.
-        Expected keys: ``signal_type``, ``obi``, ``sdr``, ``spread_ratio``,
-        ``price_momentum_dev``, ``anomaly_score``, ``timestamp``.
+        Expected keys: ``signal_type``, ``obi``, ``sdr``, ``platform_spread``,
+        ``lease_roi``, ``anomaly_score``, ``timestamp``.
 
     Returns
     -------
@@ -64,8 +64,8 @@ def format_anomaly_alert(item_name: str, result: dict) -> dict:
 
     obi: float = result.get("obi", float("nan"))
     sdr: float = result.get("sdr", float("nan"))
-    spread_ratio: float = result.get("spread_ratio", float("nan"))
-    pmd: float = result.get("price_momentum_dev", float("nan"))
+    platform_spread: float = result.get("platform_spread", float("nan"))
+    lease_roi: float = result.get("lease_roi", float("nan"))
     score: float = result.get("anomaly_score", float("nan"))
     timestamp: str = result.get("timestamp", "N/A")
 
@@ -78,10 +78,10 @@ def format_anomaly_alert(item_name: str, result: dict) -> dict:
         "### 📊 订单簿指标\n\n"
         f"| 指标 | 数值 |\n"
         f"|------|------|\n"
-        f"| OBI（订单失衡） | `{obi:.4f}` |\n"
-        f"| SDR（供应萎缩率） | `{sdr:.4f}` |\n"
-        f"| 价差比率 | `{spread_ratio:.4f}` |\n"
-        f"| 价格动量偏差 | `{pmd:.4f}` |\n"
+        f"| OBI（短期供应突变率） | `{obi:.4f}` |\n"
+        f"| SDR（宏观供应萎缩率） | `{sdr:.4f}` |\n"
+        f"| 跨平台价差比 | `{platform_spread:.4f}` |\n"
+        f"| 租售比 | `{lease_roi:.4f}` |\n"
         f"| 异常得分 | `{score:.4f}` |\n"
     )
 

@@ -19,20 +19,20 @@ def _make_snapshot(
     timestamp=None,
     lowest_ask=10.50,
     highest_bid=9.80,
-    ask_vol=100,
-    bid_vol=200,
     total_sell=500,
     total_buy=300,
+    yyyp_sell=0.0,
+    yyyp_lease=0.0,
 ) -> OrderBookSnapshot:
     return OrderBookSnapshot(
         item_name=item_name,
         timestamp=timestamp or int(time.time()),
         lowest_ask_price=lowest_ask,
         highest_bid_price=highest_bid,
-        ask_volume_top5=ask_vol,
-        bid_volume_top5=bid_vol,
         total_sell_orders=total_sell,
         total_buy_orders=total_buy,
+        yyyp_sell_price=yyyp_sell,
+        yyyp_lease_price=yyyp_lease,
     )
 
 
@@ -271,13 +271,14 @@ class TestGetLatestSnapshot:
         assert result is None
 
     def test_returns_dict_with_correct_keys(self):
-        row = (datetime.now(tz=timezone.utc), 42, 10.5, 9.8, 100, 200, 500, 300)
+        row = (datetime.now(tz=timezone.utc), 42, 10.5, 9.8, 500, 300, 9.5, 0.05)
         repo, _ = self._make_repo_with_fetchone(row)
         result = repo.get_latest_snapshot(42)
         assert isinstance(result, dict)
         expected_keys = {
             "time", "item_nameid", "lowest_ask_price", "highest_bid_price",
-            "ask_volume_top5", "bid_volume_top5", "total_sell_orders", "total_buy_orders",
+            "total_sell_orders", "total_buy_orders",
+            "yyyp_sell_price", "yyyp_lease_price",
         }
         assert set(result.keys()) == expected_keys
 

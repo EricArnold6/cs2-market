@@ -18,8 +18,8 @@ def _make_result(
     signal_type: str = "NORMAL",
     obi: float = 0.1,
     sdr: float = 0.05,
-    spread_ratio: float = 0.02,
-    price_momentum_dev: float = 0.01,
+    platform_spread: float = 0.02,
+    lease_roi: float = 0.005,
     anomaly_score: float = -0.08,
     timestamp: str = "2026-03-05T12:00:00+00:00",
 ) -> dict:
@@ -28,8 +28,8 @@ def _make_result(
         "signal_type": signal_type,
         "obi": obi,
         "sdr": sdr,
-        "spread_ratio": spread_ratio,
-        "price_momentum_dev": price_momentum_dev,
+        "platform_spread": platform_spread,
+        "lease_roi": lease_roi,
         "anomaly_score": anomaly_score,
         "timestamp": timestamp,
     }
@@ -81,7 +81,7 @@ class TestFormatter:
         assert "red" in text
 
     def test_dump_risk_text_contains_orange_color(self):
-        result = _make_result(signal_type="DUMP_RISK", obi=-0.8, spread_ratio=0.1)
+        result = _make_result(signal_type="DUMP_RISK", obi=-0.8, lease_roi=0.0005)
         payload = format_anomaly_alert("AWP | Asiimov (Field-Tested)", result)
         text = payload["markdown"]["text"]
         assert "orange" in text
@@ -97,8 +97,8 @@ class TestFormatter:
             signal_type="IRREGULAR",
             obi=0.1234,
             sdr=0.0567,
-            spread_ratio=0.0891,
-            price_momentum_dev=-0.0234,
+            platform_spread=0.0891,
+            lease_roi=0.0042,
             anomaly_score=-0.4321,
         )
         payload = format_anomaly_alert("Test Item", result)
@@ -247,7 +247,7 @@ class TestAlertDispatcher:
         dispatcher = AlertDispatcher(mock_alerter)
         result = dispatcher.dispatch(
             "AWP | Asiimov",
-            _make_result(signal_type="DUMP_RISK", obi=-0.8, spread_ratio=0.1),
+            _make_result(signal_type="DUMP_RISK", obi=-0.8, lease_roi=0.0005),
         )
         assert result is True
         mock_alerter.send.assert_called_once()
