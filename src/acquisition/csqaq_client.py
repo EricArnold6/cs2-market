@@ -13,18 +13,30 @@ from src.acquisition.exceptions import NameIdExtractionError
 logger = logging.getLogger(__name__)
 
 
+_DEFAULT_BASE_URL_PUBLIC = "https://api.csqaq.com/api/v1"
+_DEFAULT_BASE_URL_VIP    = "https://private-api.csqaq.com/api/v1"
+
+
 class CSQAQClient:
     """High-performance REST client for CSQAQ Data API."""
 
-    BASE_URL_PUBLIC = "https://api.csqaq.com/api/v1"
-    BASE_URL_VIP    = "https://private-api.csqaq.com/api/v1"
-
-    def __init__(self, api_token: str, vip_token: str = "", cache: Optional[_NameIdCache] = None) -> None:
+    def __init__(
+        self,
+        api_token: str,
+        vip_token: str = "",
+        cache: Optional[_NameIdCache] = None,
+        base_url_public: str = _DEFAULT_BASE_URL_PUBLIC,
+        base_url_vip: str = _DEFAULT_BASE_URL_VIP,
+    ) -> None:
         """
         初始化客户端
-        :param api_token: CSQAQ 普通接口 ApiToken
-        :param vip_token: CSQAQ VIP 接口 ApiToken
+        :param api_token:       CSQAQ 普通接口 ApiToken
+        :param vip_token:       CSQAQ VIP 接口 ApiToken
+        :param base_url_public: 公共 API 域名（默认从 settings.json 注入）
+        :param base_url_vip:    VIP API 域名（默认从 settings.json 注入）
         """
+        self.BASE_URL_PUBLIC = base_url_public
+        self.BASE_URL_VIP    = base_url_vip
         self._cache = cache if cache is not None else _NameIdCache()
 
         self._session = requests.Session()
@@ -57,7 +69,14 @@ class CSQAQClient:
         params = {"text": item_name}
 
         try:
-            resp = self._session.get(url, params=params, headers=self._headers_public, timeout=10)
+            time.sleep(1.1)  # respect 1 req/s rate limit
+            for _attempt in range(3):
+                resp = self._session.get(url, params=params, headers=self._headers_public, timeout=10)
+                if resp.status_code == 429:
+                    logger.warning("resolve_item_nameid: 429 rate-limited, retrying in 2s (attempt %d/3)", _attempt + 1)
+                    time.sleep(2.0)
+                    continue
+                break
             resp.raise_for_status()
             data = resp.json()
 
@@ -89,12 +108,20 @@ class CSQAQClient:
         snapshots = []
 
         chunk_size = 50
-        for i in range(0, len(market_hash_names), chunk_size):
+        for idx, i in enumerate(range(0, len(market_hash_names), chunk_size)):
+            if idx > 0:
+                time.sleep(1.1)  # respect 1 req/s rate limit between chunks
             chunk = market_hash_names[i:i + chunk_size]
             payload = {"marketHashNameList": chunk}
 
             try:
-                resp = self._session.post(url, json=payload, headers=self._headers_public, timeout=15)
+                for _attempt in range(3):
+                    resp = self._session.post(url, json=payload, headers=self._headers_public, timeout=15)
+                    if resp.status_code == 429:
+                        logger.warning("fetch_batch_prices: 429 rate-limited, retrying in 2s (attempt %d/3)", _attempt + 1)
+                        time.sleep(2.0)
+                        continue
+                    break
                 resp.raise_for_status()
                 res_json = resp.json()
 

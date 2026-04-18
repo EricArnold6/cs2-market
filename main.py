@@ -1,7 +1,7 @@
 """QuantOrchestrator — CS2 market monitoring daemon (CSQAQ Batch Version).
 
 Entry point for the full data pipeline:
-    fetch(Batch) → store → detect anomalies → alert
+    fetch(Batch) → store → detect anomalies (w/ Whale Tracking) → alert
 
 Usage
 -----
@@ -16,7 +16,6 @@ import logging
 import sys
 import time
 from pathlib import Path
-from src.analysis.prediction.whale_tracker import WhaleTracker
 
 import psycopg2
 
@@ -77,15 +76,21 @@ class QuantOrchestrator:
         csqaq_cfg = cfg.get("csqaq", {})
         api_token = csqaq_cfg.get("api_token", "")
         vip_token = csqaq_cfg.get("vip_token", "")
-        self._client = CSQAQClient(api_token=api_token, vip_token=vip_token)
+        self._client = CSQAQClient(
+            api_token=api_token,
+            vip_token=vip_token,
+            base_url_public=csqaq_cfg.get("base_url_public", ""),
+            base_url_vip=csqaq_cfg.get("base_url_vip", ""),
+        )
         self._initializer = NameIdInitializer(self._client)
 
         # Storage
         self._db = DatabaseConnection(self._db_config)
         self._repo: OrderBookRepository | None = None
 
-        # Anomaly detection (shares the same DB config)
-        self._detector = MarketAnomalyDetector(self._db_config)
+        # Anomaly detection
+        # ⚠️ 架构升级：将 API 客户端注入 Detector，让 Detector 原生拥有 K线和巨鲸的调用能力
+        self._detector = MarketAnomalyDetector(self._db_config, self._client)
 
         # Alerting
         dt_cfg = cfg["dingtalk"]
@@ -94,9 +99,6 @@ class QuantOrchestrator:
             secret=dt_cfg.get("secret"),
         )
         self._dispatcher = AlertDispatcher(self._alerter)
-
-        # --- 新增：挂载 V4.0 巨鲸预测引擎 ---
-        self._whale_tracker = WhaleTracker(self._client)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -135,15 +137,12 @@ class QuantOrchestrator:
                         "Could not register item metadata for %r: %s", english_name, exc
                     )
 
-        # Phase 4 — send startup ping
-        # self._alerter.send_text("🟢 CS2 Market Monitor (CSQAQ节点) 已启动")
         logger.info("Startup complete.")
 
     def shutdown(self) -> None:
         """Send shutdown notification and close DB."""
         logger.info("Shutting down…")
         try:
-            # self._alerter.send_text("🔴 CS2 Market Monitor 已停止 (System stopped)")
             logger.info("CS2 Market Monitor 已停止 (System stopped)")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not send shutdown notification: %s", exc)
@@ -152,7 +151,6 @@ class QuantOrchestrator:
 
     def run_forever(self) -> None:
         """Main loop — fetches all items in one batch, then sleeps."""
-        # 因为变成了批量接口，你可以把配置里的扫图间隔设为 1~3 分钟，而不是以前的 15 分钟
         scan_interval_s = self._system_cfg.get("scan_interval_minutes", 3) * 60
 
         logger.info(
@@ -192,43 +190,6 @@ class QuantOrchestrator:
                 logger.warning("Cannot resolve English name for %r, skipping in this cycle", chinese_name)
         return english_names
 
-    def _verify_volume_breakout(self, csqaq_id: int, signal_type: str) -> bool:
-        """
-        二级风控拦截器：通过真实 K 线成交量校验突破有效性。
-        返回 True 代表验证通过（真突破），False 代表验证失败（假突破/诱多）。
-        """
-        # 拉取 1 小时级别的 K 线数据
-        klines = self._client.fetch_kline_data(csqaq_id, periods="1hour")
-
-        if not klines or len(klines) < 6:
-            # 如果接口没数据或者刚上架没多久，选择放行（保守策略）
-            return True
-
-        # 提取过去 5 个小时的成交量计算"日常均量"
-        recent_vols = [float(k.get("v", 0)) for k in klines[-6:-1]]
-        avg_vol = sum(recent_vols) / len(recent_vols) if recent_vols else 1.0
-
-        # 提取最近 1 个小时（当前）的成交量
-        curr_vol = float(klines[-1].get("v", 0))
-
-        # 计算成交量倍率
-        vol_ratio = curr_vol / (avg_vol + 1e-6)
-        logger.info(
-            "[Volume Check] ID: %d | Current Vol: %.1f | Avg Vol: %.1f | Ratio: %.2fx",
-            csqaq_id, curr_vol, avg_vol, vol_ratio
-        )
-
-        if signal_type == "ACCUMULATION":
-            # 铁律：建仓/拉升必须伴随放量！
-            # 如果当前1小时的成交量还不到平时的 1.5 倍，实锤"左手倒右手"假拉升
-            return vol_ratio > 1.5
-
-        elif signal_type == "DUMP_RISK":
-            # 砸盘通常也伴随恐慌盘涌出（放量），设置为 1.2 倍过滤试探性砸盘
-            return vol_ratio > 1.2
-
-        return True
-
     def _scan_all_items_batch(self) -> None:
         """Run one full scan cycle with Market Breadth Risk Control."""
         logger.info("Fetching batch prices for %d items...", len(self._target_items))
@@ -239,13 +200,11 @@ class QuantOrchestrator:
             logger.warning("No snapshots returned from API in this cycle.")
             return
 
-        # 暂存本轮所有的检测结果，用于事后统一分发
         pending_alerts = []
-        # 用于计算大盘情绪的市场广度数组
         market_spreads = []
 
         # ==========================================
-        # 阶段 1：入库与异常检测 (收集数据)
+        # 阶段 1：入库与异常检测 (完全委托给 Detector)
         # ==========================================
         for snap in snapshots:
             csqaq_id = self._client.cache.get(snap.item_name)
@@ -261,36 +220,11 @@ class QuantOrchestrator:
                 continue
 
             try:
+                # Detector 内部已集成 K线 与 巨鲸追踪，直接输出终极定性信号
                 result = self._detector.detect_anomalies(csqaq_id)
                 if result is not None:
                     market_spreads.append(result.get("spread_ratio", 0.0))
-
-                    signal = result.get("signal_type")
-
-                    # 当发现有异动时，启动二级与三级验证
-                    if signal in ("ACCUMULATION", "DUMP_RISK"):
-                        # 二级验证：K 线真实成交量
-                        is_valid = self._verify_volume_breakout(csqaq_id, signal)
-
-                        if is_valid:
-                            # 三级验证：V4.0 巨鲸筹码追踪
-                            whale_data = self._whale_tracker.calculate_accumulation_index(csqaq_id)
-
-                            if whale_data["status"] == "STRONG_PREDICTIVE_BUY" and signal == "ACCUMULATION":
-                                # 绝杀！升格为巨鲸买入信号，并把大户动态塞进报警信息里
-                                result["signal_type"] = "WHALE_CONFIRMED_BUY"
-                                result["whale_msg"] = whale_data["msg"]
-                                logger.info("🚀 绝杀确认！散户K线与庄家筹码同时指向暴涨：%s", snap.item_name)
-
-                            elif whale_data["status"] == "PREDICTIVE_DUMP" and signal == "ACCUMULATION":
-                                # 诱多！盘口在涨，但大户在疯狂倒货
-                                logger.warning("🚨 致命诱多陷阱被识破！盘口暴涨但巨鲸在出货：%s，强制拦截！", snap.item_name)
-                                result["signal_type"] = "IRREGULAR"
-
-                        else:
-                            logger.warning("🚨 拦截虚假信号 (Volume Check Failed): %r 无量拉升！", snap.item_name)
-                            result["signal_type"] = "IRREGULAR"
-
+                    # 原封不动推入发送队列
                     pending_alerts.append((snap.item_name, result))
             except Exception as exc:
                 logger.error("Anomaly detection failed for %r: %s", snap.item_name, exc)
@@ -299,12 +233,10 @@ class QuantOrchestrator:
         # 阶段 2：计算大盘情绪与熔断 (Market Risk Control)
         # ==========================================
         if market_spreads:
-            # 计算全盘平均波动率
             avg_spread = sum(market_spreads) / len(market_spreads)
             logger.info("Market Breadth (Avg Spread): %.2f%%", avg_spread * 100)
 
-            # 熔断条件：如果在短短 3 分钟内，监控池平均跌幅超过 1.5% (-0.015)
-            # 这通常意味着系统级风险（V社发公告、大商户集体爆仓抛售）
+            # 熔断条件：监控池平均跌幅超过 1.5%
             is_crashing = avg_spread < -0.015
             self._dispatcher.update_market_status(is_crashing)
 

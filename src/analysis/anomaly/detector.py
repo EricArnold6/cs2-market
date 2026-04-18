@@ -1,7 +1,8 @@
-"""Anomaly detection with Dynamic Z-Score Thresholds."""
+"""Anomaly detection with Dynamic Z-Score, Volume Verification, and Whale Tracking."""
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone, timedelta
 
 import pandas as pd
@@ -10,18 +11,12 @@ from sqlalchemy import create_engine, text
 
 from src.storage.database import DatabaseConnection
 from src.analysis.anomaly.features import engineer_features
+from src.analysis.prediction.whale_tracker import WhaleTracker
 
+logger = logging.getLogger(__name__)
 
-# 关键修改：因为 SDR 自身需要 6 个周期，再算 Z-Score 又需要 12 个周期
-# 6 + 12 - 1 = 17。为了保险起见，我们将模型预热期延长至 18 个数据点（约 54 分钟）。
 _MIN_ROWS = 18
-
-_FEATURE_COLS = [
-    "obi", "spread_ratio", "sdr", "price_momentum_dev",
-    "platform_spread", "lease_roi", "price_volatility"
-]
-
-# 数据清洗时，需要额外验证这些 Z-Score 是否计算完成
+_FEATURE_COLS = ["obi", "spread_ratio", "sdr", "price_momentum_dev", "platform_spread", "lease_roi", "price_volatility"]
 _EVAL_COLS = _FEATURE_COLS + ["obi_z", "sdr_z", "spread_z"]
 
 _SQL = """
@@ -33,12 +28,14 @@ _SQL = """
     ORDER BY time ASC
 """
 
-
 class MarketAnomalyDetector:
-    """Fit an Isolation Forest on recent order-book snapshots and score them."""
+    """Fit an Isolation Forest and verify signals with Level-2/Whale data."""
 
-    def __init__(self, db_config: dict) -> None:
+    # ⚠️ 架构升级：注入 API 客户端，让探测器能拉取验证数据
+    def __init__(self, db_config: dict, client) -> None:
         self._db = DatabaseConnection(db_config)
+        self._client = client
+        self._whale_tracker = WhaleTracker(client)
 
         user = db_config.get("user")
         password = db_config.get("password")
@@ -47,9 +44,9 @@ class MarketAnomalyDetector:
         dbname = db_config.get("dbname")
         self._engine_uri = f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{dbname}"
 
+    # ... (fetch_recent_data 和 engineer_features 保持不变) ...
     def fetch_recent_data(self, item_nameid: int, hours: int = 24) -> pd.DataFrame:
         cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=hours)
-
         engine = create_engine(self._engine_uri)
         try:
             with engine.connect() as conn:
@@ -72,18 +69,13 @@ class MarketAnomalyDetector:
         df_feat = self.engineer_features(df_raw)
         df_feat["time"] = df_raw["time"].values
 
-        # 这里使用包含 Z-Score 的新列表来丢弃预热期空值
         df_clean = df_feat.dropna(subset=_EVAL_COLS).reset_index(drop=True)
         if len(df_clean) < _MIN_ROWS:
             return None
 
         X = df_clean[_FEATURE_COLS].values
 
-        model = IsolationForest(
-            n_estimators=100,
-            contamination=0.05,
-            random_state=42,
-        )
+        model = IsolationForest(n_estimators=100, contamination=0.05, random_state=42)
         labels = model.fit_predict(X)
         scores = model.score_samples(X)
 
@@ -92,16 +84,38 @@ class MarketAnomalyDetector:
         last_label = labels[last_idx]
         last_score = float(scores[last_idx])
 
+        # 1. 基础异常评估
         if last_label == -1:
-            # 修改：将包含 Z-Score 的完整 Series 传给诊断函数
             signal_type = self._evaluate_signal(last_row)
         else:
             signal_type = "NORMAL"
 
+        whale_msg = None
+
+        # ==========================================
+        # 2. 信号二次/三次升级验证逻辑 (核心重构点)
+        # ==========================================
+        if signal_type in ("ACCUMULATION", "DUMP_RISK"):
+            is_valid_volume = self._verify_volume_breakout(item_nameid, signal_type)
+
+            if is_valid_volume:
+                # K线放量确认，触发巨鲸追踪
+                whale_data = self._whale_tracker.calculate_accumulation_index(item_nameid)
+
+                if whale_data["status"] == "STRONG_PREDICTIVE_BUY" and signal_type == "ACCUMULATION":
+                    signal_type = "WHALE_CONFIRMED_BUY"
+                    whale_msg = whale_data["msg"]
+                elif whale_data["status"] == "PREDICTIVE_DUMP" and signal_type == "ACCUMULATION":
+                    # 庄家借大盘拉升出货，拦截！
+                    signal_type = "IRREGULAR"
+            else:
+                # 无量空涨，拦截！
+                signal_type = "IRREGULAR"
+
         ts = last_row["time"]
         timestamp = ts.isoformat() if isinstance(ts, pd.Timestamp) else str(ts)
 
-        return {
+        result = {
             "timestamp": timestamp,
             "anomaly_score": last_score,
             "obi": float(last_row["obi"]),
@@ -109,12 +123,18 @@ class MarketAnomalyDetector:
             "sdr": float(last_row["sdr"]),
             "price_momentum_dev": float(last_row["price_momentum_dev"]),
             "platform_spread": float(last_row["platform_spread"]),
+            "price_volatility": float(last_row["price_volatility"]),
             "signal_type": signal_type,
         }
 
-    def _evaluate_signal(self, status: pd.Series) -> str:
-        """Classify anomalous row using dynamic Z-Score and Volatility confirmation."""
+        if whale_msg:
+            result["whale_msg"] = whale_msg
 
+        return result
+
+    def _evaluate_signal(self, status: pd.Series) -> str:
+        """Classify anomalous row using dynamic Z-Score logic."""
+        # ... (保持你之前的隔离森林判定逻辑不变) ...
         obi = float(status["obi"])
         obi_z = float(status["obi_z"])
         sdr_z = float(status["sdr_z"])
@@ -122,29 +142,38 @@ class MarketAnomalyDetector:
         spread_ratio = float(status["spread_ratio"])
         volatility = float(status["price_volatility"])
 
-        # 1. 跨平台搬砖信号
         if platform_spread > 0.05:
             return "ARBITRAGE_OPPORTUNITY"
 
-        # 2. 终极建仓/突破信号 (ACCUMULATION)
-        # 条件 A: 供应显著萎缩 (sdr_z > 2.0)
-        # 条件 B: 瞬间被扫货 (obi_z > 2.5 且 obi > 0)
         if sdr_z > 2.0 and obi_z > 2.5 and obi > 0:
-            # --- 增加波动率与价差确认（防左手倒右手假拉升） ---
-            # 如果庄家只是自己挂高价自己买，价格涨了（spread_ratio > 0），
-            # 但其实没人跟风，平时的波动率极大（常常上蹿下跳）。
-            # 真正的建仓突破往往伴随着：平时波动率极低（volatility < 0.05 即 5%），但此刻价格上扬。
             if spread_ratio >= 0 and volatility < 0.05:
                 return "ACCUMULATION"
             else:
-                return "IRREGULAR"  # 疑似高波动率的“骗炮”洗盘，降级为普通异动
+                return "IRREGULAR"
 
-        # 3. 终极砸盘预警 (DUMP_RISK)
-        # 抛压瞬间激增，且价格实质性下挫
         if obi_z < -2.5 and obi < 0:
-            if spread_ratio < -0.01:  # 伴随至少 1% 的实质性破位下跌
+            if spread_ratio < -0.01:
                 return "DUMP_RISK"
             else:
-                return "IRREGULAR"  # 光挂单不砸价（可能是压盘），降级
+                return "IRREGULAR"
 
         return "IRREGULAR"
+
+    def _verify_volume_breakout(self, csqaq_id: int, signal_type: str) -> bool:
+        """K线真实成交量校验"""
+        klines = self._client.fetch_kline_data(csqaq_id, periods="1hour")
+        if not klines or len(klines) < 6:
+            return True
+
+        recent_vols = [float(k.get("v", 0)) for k in klines[-6:-1]]
+        avg_vol = sum(recent_vols) / len(recent_vols) if recent_vols else 1.0
+        curr_vol = float(klines[-1].get("v", 0))
+
+        vol_ratio = curr_vol / (avg_vol + 1e-6)
+
+        if signal_type == "ACCUMULATION":
+            return vol_ratio > 1.5
+        elif signal_type == "DUMP_RISK":
+            return vol_ratio > 1.2
+
+        return True
