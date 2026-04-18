@@ -11,8 +11,9 @@ from src.alerting.formatter import format_anomaly_alert
 
 logger = logging.getLogger(__name__)
 
-# Signal types that are NOT worth alerting (market is quiet)
-_SILENT_SIGNALS = frozenset({"NORMAL"})
+# Signal types that are NOT worth alerting (market is quiet, or signal was intercepted as fake)
+# ⚠️ 关键更新：将 IRREGULAR 加入静默列表。被 K线/巨鲸 拦截的假信号将被彻底无视
+_SILENT_SIGNALS = frozenset({"NORMAL", "IRREGULAR"})
 
 
 class AlertDispatcher:
@@ -31,7 +32,7 @@ class AlertDispatcher:
     def update_market_status(self, is_crashing: bool) -> None:
         """Update the circuit breaker status based on market breadth."""
         if is_crashing and not self._market_is_crashing:
-            logger.warning("🔴 [CIRCUIT BREAKER ENGAGED] Market is crashing! ACCUMULATION signals will be blocked.")
+            logger.warning("🔴 [CIRCUIT BREAKER ENGAGED] Market is crashing! Long signals will be blocked.")
         elif not is_crashing and self._market_is_crashing:
             logger.info("🟢 [CIRCUIT BREAKER LIFTED] Market stabilized. Normal alerting resumed.")
 
@@ -60,24 +61,26 @@ class AlertDispatcher:
 
         signal_type: str = result.get("signal_type", "UNKNOWN")
         if signal_type in _SILENT_SIGNALS:
-            logger.debug("dispatch: %r is NORMAL, skipping alert", item_name)
+            logger.debug("dispatch: %r is %s, skipping alert", item_name, signal_type)
             return False
 
         # ==========================================
         # 风控拦截逻辑 (Circuit Breaker)
         # ==========================================
-        # 如果大盘暴跌，屏蔽所有的“建仓(做多)”信号，防止逆势接飞刀
-        if self._market_is_crashing and signal_type == "ACCUMULATION":
+        # 如果大盘暴跌，屏蔽所有的“做多”信号 (包含普通建仓和巨鲸建仓)，防止逆势接飞刀
+        if self._market_is_crashing and signal_type in ("ACCUMULATION", "WHALE_CONFIRMED_BUY"):
             score = result.get("anomaly_score", 0.0)
             logger.warning(
-                "dispatch: Blocked ACCUMULATION signal for %r due to systemic market crash. (Score: %.3f)",
-                item_name, score
+                "dispatch: Blocked %s signal for %r due to systemic market crash. (Score: %.3f)",
+                signal_type, item_name, score
             )
             return False
 
         logger.info(
             "dispatch: sending %s alert for %r", signal_type, item_name
         )
+
+        # 委派给专门的 formatter 模块处理排版
         payload = format_anomaly_alert(item_name, result)
         success = self._alerter.send(payload)
 

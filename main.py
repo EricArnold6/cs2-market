@@ -16,6 +16,7 @@ import logging
 import sys
 import time
 from pathlib import Path
+from src.analysis.prediction.whale_tracker import WhaleTracker
 
 import psycopg2
 
@@ -69,17 +70,14 @@ class QuantOrchestrator:
         self._db_config: dict = cfg["database"]
         self._system_cfg: dict = cfg["system"]
 
-        # 兼容旧配置：如果 target_items 还是字典 {"123": "AK47"}，就提取 values 变成列表
-        raw_targets = cfg["target_items"]
-        if isinstance(raw_targets, dict):
-            self._target_items: list[str] = list(raw_targets.values())
-        else:
-            self._target_items: list[str] = raw_targets
+        # target_items 现在是中文名列表，如 ["M4A4 | 地狱烈火 (久经沙场)", ...]
+        self._target_items: list[str] = cfg["target_items"]
 
         # Acquisition (接入 CSQAQ)
         csqaq_cfg = cfg.get("csqaq", {})
-        api_token = csqaq_cfg.get("api_token", "YOUR_API_TOKEN")
-        self._client = CSQAQClient(api_token=api_token)
+        api_token = csqaq_cfg.get("api_token", "")
+        vip_token = csqaq_cfg.get("vip_token", "")
+        self._client = CSQAQClient(api_token=api_token, vip_token=vip_token)
         self._initializer = NameIdInitializer(self._client)
 
         # Storage
@@ -97,6 +95,9 @@ class QuantOrchestrator:
         )
         self._dispatcher = AlertDispatcher(self._alerter)
 
+        # --- 新增：挂载 V4.0 巨鲸预测引擎 ---
+        self._whale_tracker = WhaleTracker(self._client)
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -105,9 +106,10 @@ class QuantOrchestrator:
         """Resolve CSQAQ good_ids, open DB, send startup notification."""
         logger.info("=== QuantOrchestrator (CSQAQ Version) starting up ===")
 
-        # Phase 1 — 使用联想查询接口批量获取所有饰品的专属 ID
+        # Phase 1 — 优先从本地 TXT 离线文件解析中文名对应的 CSQAQ ID，再 fallback HTTP
+        _TXT_PATH = Path("data") / "饰品id（更新时间2026-01-23）.txt"
         logger.info("Resolving CSQAQ IDs for %d item(s)…", len(self._target_items))
-        result = self._initializer.run(self._target_items)
+        result = self._initializer.run(self._target_items, txt_path=_TXT_PATH)
         logger.info("NameId init: %s", result)
         if not result.all_succeeded:
             failed_names = list(result.failed.keys())
@@ -119,25 +121,30 @@ class QuantOrchestrator:
         logger.info("Database connection established.")
 
         # Phase 3 — register all items in metadata table
-        for name in self._target_items:
-            csqaq_id = self._client.cache.get(name)
+        for chinese_name in self._target_items:
+            english_name = self._client.cache.get_english_name(chinese_name)
+            if english_name is None:
+                logger.warning("No English name cached for %r, skipping metadata init", chinese_name)
+                continue
+            csqaq_id = self._client.cache.get(english_name)
             if csqaq_id is not None:
                 try:
-                    self._repo.init_item_metadata(csqaq_id, name)
+                    self._repo.init_item_metadata(csqaq_id, english_name)
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
-                        "Could not register item metadata for %r: %s", name, exc
+                        "Could not register item metadata for %r: %s", english_name, exc
                     )
 
         # Phase 4 — send startup ping
-        self._alerter.send_text("🟢 CS2 Market Monitor (CSQAQ节点) 已启动")
+        # self._alerter.send_text("🟢 CS2 Market Monitor (CSQAQ节点) 已启动")
         logger.info("Startup complete.")
 
     def shutdown(self) -> None:
         """Send shutdown notification and close DB."""
         logger.info("Shutting down…")
         try:
-            self._alerter.send_text("🔴 CS2 Market Monitor 已停止 (System stopped)")
+            # self._alerter.send_text("🔴 CS2 Market Monitor 已停止 (System stopped)")
+            logger.info("CS2 Market Monitor 已停止 (System stopped)")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not send shutdown notification: %s", exc)
         self._db.close()
@@ -174,11 +181,60 @@ class QuantOrchestrator:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _get_english_names(self) -> list[str]:
+        """将中文名列表转换为英文名列表（通过 name_map cache）。"""
+        english_names = []
+        for chinese_name in self._target_items:
+            english = self._client.cache.get_english_name(chinese_name)
+            if english is not None:
+                english_names.append(english)
+            else:
+                logger.warning("Cannot resolve English name for %r, skipping in this cycle", chinese_name)
+        return english_names
+
+    def _verify_volume_breakout(self, csqaq_id: int, signal_type: str) -> bool:
+        """
+        二级风控拦截器：通过真实 K 线成交量校验突破有效性。
+        返回 True 代表验证通过（真突破），False 代表验证失败（假突破/诱多）。
+        """
+        # 拉取 1 小时级别的 K 线数据
+        klines = self._client.fetch_kline_data(csqaq_id, periods="1hour")
+
+        if not klines or len(klines) < 6:
+            # 如果接口没数据或者刚上架没多久，选择放行（保守策略）
+            return True
+
+        # 提取过去 5 个小时的成交量计算"日常均量"
+        recent_vols = [float(k.get("v", 0)) for k in klines[-6:-1]]
+        avg_vol = sum(recent_vols) / len(recent_vols) if recent_vols else 1.0
+
+        # 提取最近 1 个小时（当前）的成交量
+        curr_vol = float(klines[-1].get("v", 0))
+
+        # 计算成交量倍率
+        vol_ratio = curr_vol / (avg_vol + 1e-6)
+        logger.info(
+            "[Volume Check] ID: %d | Current Vol: %.1f | Avg Vol: %.1f | Ratio: %.2fx",
+            csqaq_id, curr_vol, avg_vol, vol_ratio
+        )
+
+        if signal_type == "ACCUMULATION":
+            # 铁律：建仓/拉升必须伴随放量！
+            # 如果当前1小时的成交量还不到平时的 1.5 倍，实锤"左手倒右手"假拉升
+            return vol_ratio > 1.5
+
+        elif signal_type == "DUMP_RISK":
+            # 砸盘通常也伴随恐慌盘涌出（放量），设置为 1.2 倍过滤试探性砸盘
+            return vol_ratio > 1.2
+
+        return True
+
     def _scan_all_items_batch(self) -> None:
         """Run one full scan cycle with Market Breadth Risk Control."""
         logger.info("Fetching batch prices for %d items...", len(self._target_items))
 
-        snapshots = self._client.fetch_batch_prices(self._target_items)
+        english_names = self._get_english_names()
+        snapshots = self._client.fetch_batch_prices(english_names)
         if not snapshots:
             logger.warning("No snapshots returned from API in this cycle.")
             return
@@ -207,8 +263,34 @@ class QuantOrchestrator:
             try:
                 result = self._detector.detect_anomalies(csqaq_id)
                 if result is not None:
-                    # 只要不是预热期，就收集该饰品当前的价格波动率
                     market_spreads.append(result.get("spread_ratio", 0.0))
+
+                    signal = result.get("signal_type")
+
+                    # 当发现有异动时，启动二级与三级验证
+                    if signal in ("ACCUMULATION", "DUMP_RISK"):
+                        # 二级验证：K 线真实成交量
+                        is_valid = self._verify_volume_breakout(csqaq_id, signal)
+
+                        if is_valid:
+                            # 三级验证：V4.0 巨鲸筹码追踪
+                            whale_data = self._whale_tracker.calculate_accumulation_index(csqaq_id)
+
+                            if whale_data["status"] == "STRONG_PREDICTIVE_BUY" and signal == "ACCUMULATION":
+                                # 绝杀！升格为巨鲸买入信号，并把大户动态塞进报警信息里
+                                result["signal_type"] = "WHALE_CONFIRMED_BUY"
+                                result["whale_msg"] = whale_data["msg"]
+                                logger.info("🚀 绝杀确认！散户K线与庄家筹码同时指向暴涨：%s", snap.item_name)
+
+                            elif whale_data["status"] == "PREDICTIVE_DUMP" and signal == "ACCUMULATION":
+                                # 诱多！盘口在涨，但大户在疯狂倒货
+                                logger.warning("🚨 致命诱多陷阱被识破！盘口暴涨但巨鲸在出货：%s，强制拦截！", snap.item_name)
+                                result["signal_type"] = "IRREGULAR"
+
+                        else:
+                            logger.warning("🚨 拦截虚假信号 (Volume Check Failed): %r 无量拉升！", snap.item_name)
+                            result["signal_type"] = "IRREGULAR"
+
                     pending_alerts.append((snap.item_name, result))
             except Exception as exc:
                 logger.error("Anomaly detection failed for %r: %s", snap.item_name, exc)

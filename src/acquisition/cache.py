@@ -1,4 +1,14 @@
-"""Persistent JSON cache for Steam item_nameid lookups."""
+"""Persistent JSON cache for CSQAQ item nameid lookups.
+
+磁盘格式（v2）::
+
+    {
+      "id_map":   {"英文名": nameid, ...},
+      "name_map": {"中文名": "英文名", ...}
+    }
+
+向后兼容旧格式（flat ``{str: int}`` 字典）：读取时自动迁移，下次 flush 后写成 v2 格式。
+"""
 
 import json
 import logging
@@ -15,45 +25,103 @@ _CACHE_FILE = Path(__file__).parent.parent.parent / "data" / "nameid_cache.json"
 
 
 class _NameIdCache:
-    """Persistent JSON cache mapping item names to Steam ``item_nameid`` integers."""
+    """Persistent JSON cache mapping item names to CSQAQ ``good_id`` integers.
+
+    内部维护两张表：
+
+    * ``_id_map``   — ``{英文市场名: nameid}``，用于 API 调用
+    * ``_name_map`` — ``{中文名: 英文名}``，用于中文配置 → 英文名转换
+    """
 
     def __init__(self, cache_path: Path = _CACHE_FILE) -> None:
         self._path = cache_path
-        self._data: dict = {}
+        self._id_map: dict[str, int] = {}
+        self._name_map: dict[str, str] = {}
         self._lock = threading.Lock()
         self._load()
 
+    # ------------------------------------------------------------------
+    # 磁盘 I/O
+    # ------------------------------------------------------------------
+
     def _load(self) -> None:
-        """Load cache from disk; silently ignore missing / corrupt files."""
+        """Load cache from disk; silently ignore missing / corrupt files.
+
+        兼容旧格式（``{str: int}`` flat dict）：自动迁移到 ``_id_map``。
+        """
         try:
             with open(self._path, "r", encoding="utf-8") as fh:
                 loaded = json.load(fh)
-            if isinstance(loaded, dict):
-                self._data = loaded
+            if not isinstance(loaded, dict):
+                return
+            # v2 格式：含 id_map / name_map 键
+            if "id_map" in loaded or "name_map" in loaded:
+                raw_id = loaded.get("id_map", {})
+                raw_nm = loaded.get("name_map", {})
+                if isinstance(raw_id, dict):
+                    self._id_map = {k: v for k, v in raw_id.items() if isinstance(v, int)}
+                if isinstance(raw_nm, dict):
+                    self._name_map = {k: v for k, v in raw_nm.items() if isinstance(v, str)}
+            else:
+                # v1 旧格式：flat {英文名: int}，全部放进 _id_map
+                self._id_map = {k: v for k, v in loaded.items() if isinstance(v, int)}
         except (FileNotFoundError, json.JSONDecodeError):
-            self._data = {}
-
-    def get(self, item_name: str) -> Optional[int]:
-        """Return cached nameid, or ``None`` on a cache miss."""
-        with self._lock:
-            return self._data.get(item_name)
-
-    def set(self, item_name: str, nameid: int) -> None:
-        """Store *nameid* for *item_name* and flush to disk immediately."""
-        with self._lock:
-            self._data[item_name] = nameid
-            self._flush()
+            pass
 
     def _flush(self) -> None:
-        """原子写盘；调用方必须持有 self._lock。"""
+        """原子写盘（v2 格式）；调用方必须持有 self._lock。"""
         tmp_path = self._path.with_suffix(".tmp")
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {"id_map": self._id_map, "name_map": self._name_map}
             with open(tmp_path, "w", encoding="utf-8") as fh:
-                json.dump(self._data, fh, ensure_ascii=False, indent=2)
+                json.dump(payload, fh, ensure_ascii=False, indent=2)
             os.replace(tmp_path, self._path)
         except OSError as exc:
             logger.warning("Failed to flush nameid cache: %s", exc)
+
+    # ------------------------------------------------------------------
+    # 英文名接口（向后兼容原有调用方）
+    # ------------------------------------------------------------------
+
+    def get(self, item_name: str) -> Optional[int]:
+        """用英文名查 nameid；cache miss 返回 ``None``。"""
+        with self._lock:
+            return self._id_map.get(item_name)
+
+    def set(self, item_name: str, nameid: int) -> None:
+        """存入英文名 → nameid 映射并立即刷盘。"""
+        with self._lock:
+            self._id_map[item_name] = nameid
+            self._flush()
+
+    # ------------------------------------------------------------------
+    # 中文名接口（新增）
+    # ------------------------------------------------------------------
+
+    def get_english_name(self, chinese_name: str) -> Optional[str]:
+        """通过中文名查对应英文名；未找到返回 ``None``。"""
+        with self._lock:
+            return self._name_map.get(chinese_name)
+
+    def get_by_chinese(self, chinese_name: str) -> Optional[int]:
+        """通过中文名查 nameid（中文→英文→id）；未找到返回 ``None``。"""
+        with self._lock:
+            english = self._name_map.get(chinese_name)
+            if english is None:
+                return None
+            return self._id_map.get(english)
+
+    def set_full(self, chinese_name: str, english_name: str, nameid: int) -> None:
+        """同时写入 ``name_map[中文]=英文`` 和 ``id_map[英文]=id``，一次刷盘。"""
+        with self._lock:
+            self._name_map[chinese_name] = english_name
+            self._id_map[english_name] = nameid
+            self._flush()
+
+    # ------------------------------------------------------------------
+    # 批量注入（保留原有接口）
+    # ------------------------------------------------------------------
 
     def load_from_dict(self, mapping: dict, *, overwrite: bool = False) -> int:
         """
@@ -61,7 +129,7 @@ class _NameIdCache:
 
         参数
         ----
-        mapping  : {item_name: nameid(正整数)} 字典
+        mapping  : {英文item_name: nameid(正整数)} 字典
         overwrite: False（默认）保留已有缓存条目；True 强制覆盖
 
         返回
@@ -85,9 +153,9 @@ class _NameIdCache:
         written = 0
         with self._lock:
             for name, nameid in mapping.items():
-                if not overwrite and self._data.get(name) is not None:
+                if not overwrite and self._id_map.get(name) is not None:
                     continue
-                self._data[name] = nameid
+                self._id_map[name] = nameid
                 written += 1
             if written:
                 self._flush()   # 整批只写一次磁盘

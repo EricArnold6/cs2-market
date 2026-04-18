@@ -1,36 +1,46 @@
 """DingTalk Markdown message builder for anomaly alerts.
 
 All functions are pure (no network, no file I/O) so they are trivially
-unit-testable without mocking.
+unit-testable without mocking. Includes V4.0 Whale Tracking & Volatility metrics.
 """
 
-# Signal-type display metadata
+# Signal-type display metadata (DingTalk Markdown supports hex colors)
 _SIGNAL_META: dict[str, dict] = {
+    "WHALE_CONFIRMED_BUY": {
+        "label": "🐳🚀 巨鲸绝杀建仓 (WHALE_CONFIRMED_BUY)",
+        "color": "#E62A10",  # 深红/警示红
+        "summary": "散户K线与庄家筹码同时指向暴涨，高度控盘拉升预警！",
+    },
     "ACCUMULATION": {
-        "label": "🔴 建仓扫货 (ACCUMULATION)",
-        "color": "red",
-        "summary": "检测到大量买单堆积，疑似盘主入场吸筹。",
+        "label": "🚀 放量突破建仓 (ACCUMULATION)",
+        "color": "#FF5722",  # 橙红
+        "summary": "检测到供应萎缩且K线伴随放量，疑似主力入场吸筹。",
     },
     "DUMP_RISK": {
-        "label": "🟠 撤单砸盘风险 (DUMP_RISK)",
-        "color": "orange",
-        "summary": "买盘大幅萎缩且价差扩大，警惕盘主出货或撤单。",
+        "label": "🚨 砸盘预警 (DUMP_RISK)",
+        "color": "#FF9800",  # 橘色
+        "summary": "抛压瞬间激增且价格实质性下挫，警惕主力出货或撤单。",
+    },
+    "ARBITRAGE_OPPORTUNITY": {
+        "label": "💎 跨平台套利 (ARBITRAGE_OPPORTUNITY)",
+        "color": "#2196F3",  # 科技蓝
+        "summary": "检测到显著的跨平台价差，存在无风险搬砖机会。",
     },
     "IRREGULAR": {
-        "label": "🟡 异常波动 (IRREGULAR)",
-        "color": "yellow",
-        "summary": "订单簿出现不规则异常，暂未归类为已知模式。",
+        "label": "⚠️ 不明异动 (IRREGULAR)",
+        "color": "#9E9E9E",  # 灰色
+        "summary": "订单簿出现异动，但被量价或巨鲸模型判定为疑似洗盘/诱多。",
     },
     "NORMAL": {
         "label": "🟢 正常 (NORMAL)",
-        "color": "green",
+        "color": "#4CAF50",  # 绿色
         "summary": "当前市场微结构未见异常。",
     },
 }
 
 _DEFAULT_META: dict = {
-    "label": "⚪ 未知信号",
-    "color": "gray",
+    "label": "❓ 未知信号",
+    "color": "#9E9E9E",
     "summary": "未知信号类型。",
 }
 
@@ -44,46 +54,51 @@ def format_anomaly_alert(item_name: str, result: dict) -> dict:
         Human-readable market hash name, e.g. ``"AK-47 | Redline (Field-Tested)"``.
     result : dict
         Dict returned by ``MarketAnomalyDetector.detect_anomalies()``.
-        Expected keys: ``signal_type``, ``obi``, ``sdr``, ``platform_spread``,
-        ``lease_roi``, ``anomaly_score``, ``timestamp``.
 
     Returns
     -------
     dict
-        A DingTalk robot message payload ready for ``json.dumps`` and POST::
-
-            {
-                "msgtype": "markdown",
-                "markdown": {"title": str, "text": str}
-            }
+        A DingTalk robot message payload ready for ``json.dumps`` and POST.
     """
     signal_type: str = result.get("signal_type", "UNKNOWN")
     meta = _SIGNAL_META.get(signal_type, _DEFAULT_META)
 
-    title = f"CS2 Market · {meta['label']}"
+    title = f"CS2 Market · {meta['label'].split(' ')[0]}"  # 提取 Emoji 作为通知栏标题首字符
 
-    obi: float = result.get("obi", float("nan"))
-    sdr: float = result.get("sdr", float("nan"))
-    platform_spread: float = result.get("platform_spread", float("nan"))
-    lease_roi: float = result.get("lease_roi", float("nan"))
+    # 提取所有量化指标 (将其转为百分比展示，提升可读性)
+    obi: float = result.get("obi", 0.0) * 100
+    sdr: float = result.get("sdr", 0.0) * 100
+    platform_spread: float = result.get("platform_spread", 0.0) * 100
+    spread_ratio: float = result.get("spread_ratio", 0.0) * 100
+    volatility: float = result.get("price_volatility", 0.0) * 100
     score: float = result.get("anomaly_score", float("nan"))
     timestamp: str = result.get("timestamp", "N/A")
 
+    # 基础文案构建
     text = (
         f"## {meta['label']}\n\n"
         f"**饰品：** {item_name}\n\n"
         f"**时间：** {timestamp}\n\n"
         f"**摘要：** <font color=\"{meta['color']}\">{meta['summary']}</font>\n\n"
         "---\n\n"
-        "### 📊 订单簿指标\n\n"
-        f"| 指标 | 数值 |\n"
+        "### 📊 核心量化指标\n\n"
+        f"| 指标 (Metrics) | 实时变动 |\n"
         f"|------|------|\n"
-        f"| OBI（短期供应突变率） | `{obi:.4f}` |\n"
-        f"| SDR（宏观供应萎缩率） | `{sdr:.4f}` |\n"
-        f"| 跨平台价差比 | `{platform_spread:.4f}` |\n"
-        f"| 租售比 | `{lease_roi:.4f}` |\n"
-        f"| 异常得分 | `{score:.4f}` |\n"
+        f"| 供需突变 (OBI) | `{obi:+.2f}%` |\n"
+        f"| 供应萎缩 (SDR) | `{sdr:+.2f}%` |\n"
+        f"| 价格波动 (Spread) | `{spread_ratio:+.2f}%` |\n"
+        f"| 价格变异度 (Volatility) | `{volatility:.2f}%` |\n"
+        f"| 跨平台价差 (BUFF/YYYP)| `{platform_spread:+.2f}%` |\n"
+        f"| 孤立森林 AI 异常分 | `{score:.3f}` |\n"
     )
+
+    # V4.0 巨鲸追踪专属情报拼接
+    if signal_type == "WHALE_CONFIRMED_BUY" and "whale_msg" in result:
+        text += (
+            "\n---\n\n"
+            "### 🐋 巨鲸微观追踪雷达\n\n"
+            f"> **<font color=\"{meta['color']}\">{result['whale_msg']}</font>**\n"
+        )
 
     return {
         "msgtype": "markdown",

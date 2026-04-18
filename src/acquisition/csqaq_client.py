@@ -16,21 +16,27 @@ logger = logging.getLogger(__name__)
 class CSQAQClient:
     """High-performance REST client for CSQAQ Data API."""
 
-    BASE_URL = "https://api.csqaq.com/api/v1"
+    BASE_URL_PUBLIC = "https://api.csqaq.com/api/v1"
+    BASE_URL_VIP    = "https://private-api.csqaq.com/api/v1"
 
-    def __init__(self, api_token: str, cache: Optional[_NameIdCache] = None) -> None:
+    def __init__(self, api_token: str, vip_token: str = "", cache: Optional[_NameIdCache] = None) -> None:
         """
         初始化客户端
-        :param api_token: CSQAQ 提供的 ApiToken
+        :param api_token: CSQAQ 普通接口 ApiToken
+        :param vip_token: CSQAQ VIP 接口 ApiToken
         """
-        self._api_token = api_token
         self._cache = cache if cache is not None else _NameIdCache()
 
         self._session = requests.Session()
 
-        # 显式定义字典，避开 requests.Session 的首字母大写强转逻辑
-        self._headers = {
-            "ApiToken": self._api_token,
+        # 普通接口请求头
+        self._headers_public = {
+            "ApiToken": api_token,
+            "Content-Type": "application/json"
+        }
+        # VIP 接口请求头
+        self._headers_vip = {
+            "ApiToken": vip_token,
             "Content-Type": "application/json"
         }
 
@@ -47,12 +53,11 @@ class CSQAQClient:
         if cached is not None:
             return cached
 
-        url = f"{self.BASE_URL}/search/suggest"
+        url = f"{self.BASE_URL_PUBLIC}/search/suggest"
         params = {"text": item_name}
 
         try:
-            # 修复点：强制在此处携带 self._headers
-            resp = self._session.get(url, params=params, headers=self._headers, timeout=10)
+            resp = self._session.get(url, params=params, headers=self._headers_public, timeout=10)
             resp.raise_for_status()
             data = resp.json()
 
@@ -80,7 +85,7 @@ class CSQAQClient:
         if not market_hash_names:
             return []
 
-        url = f"{self.BASE_URL}/goods/getPriceByMarketHashName"
+        url = f"{self.BASE_URL_PUBLIC}/goods/getPriceByMarketHashName"
         snapshots = []
 
         chunk_size = 50
@@ -89,8 +94,7 @@ class CSQAQClient:
             payload = {"marketHashNameList": chunk}
 
             try:
-                # 修复点：强制在此处携带 self._headers
-                resp = self._session.post(url, json=payload, headers=self._headers, timeout=15)
+                resp = self._session.post(url, json=payload, headers=self._headers_public, timeout=15)
                 resp.raise_for_status()
                 res_json = resp.json()
 
@@ -120,3 +124,117 @@ class CSQAQClient:
                 logger.error("Failed to fetch batch prices for chunk: %s", exc)
 
         return snapshots
+
+    def fetch_kline_data(self, csqaq_id: int, periods: str = "1hour") -> list[dict]:
+        """
+        [POST] /info/simple/chartAll
+        获取单件饰品K线数据，用于触发异常后的"二级量价真实性确认"。
+
+        :param csqaq_id: 饰品的 CSQAQ ID
+        :param periods: K线周期 (推荐 "1hour" 或 "4hour")
+        """
+        url = f"{self.BASE_URL_VIP}/info/simple/chartAll"
+
+        # 构造当前时间的 13 位毫秒时间戳作为 max_time
+        current_ms = int(time.time() * 1000)
+
+        payload = {
+            "good_id": str(csqaq_id),  # API 示例中传入的是字符串
+            "plat": 1,                 # 1 代表获取 BUFF 平台的真实成交记录
+            "periods": periods,
+            "max_time": current_ms
+        }
+
+        try:
+            resp = self._session.post(url, json=payload, headers=self._headers_vip, timeout=10)
+            resp.raise_for_status()
+            res_json = resp.json()
+
+            if res_json.get("code") != 200:
+                logger.error("K-Line API Error for ID %s: %s", csqaq_id, res_json.get("msg"))
+                return []
+
+            return res_json.get("data", [])
+        except Exception as exc:
+            logger.error("Failed to fetch K-Line for ID %s: %s", csqaq_id, exc)
+            return []
+
+    def fetch_whale_ranking(self, csqaq_id: int, limit: int = 10) -> list[dict]:
+        """
+        [POST] /api/v1/monitor/rank
+        获取指定饰品的持仓大户排行榜。
+        """
+        url = f"{self.BASE_URL}/monitor/rank"
+        payload = {"good_id": str(csqaq_id)}
+
+        try:
+            resp = self._session.post(url, json=payload, headers=self._headers, timeout=10)
+            resp.raise_for_status()
+            res_json = resp.json()
+
+            if res_json.get("code") != 200:
+                logger.error("Whale Rank API Error for ID %s: %s", csqaq_id, res_json.get("msg"))
+                return []
+
+            data = res_json.get("data", [])
+            # 按照持有量 (num) 降序排序，取前 limit 名大户
+            sorted_whales = sorted(data, key=lambda x: x.get("num", 0), reverse=True)
+            return sorted_whales[:limit]
+
+        except Exception as exc:
+            logger.error("Failed to fetch Whale Ranking for ID %s: %s", csqaq_id, exc)
+            return []
+
+    def fetch_user_inventory_dynamics(self, task_id: int, target_good_id: int) -> dict:
+        """
+        [POST] /api/v1/task/get_task_business
+        获取单个大户近期的库存动态记录，并统计目标饰品的净流入/流出量。
+        """
+        url = f"{self.BASE_URL}/task/get_task_business"
+        payload = {
+            "page_index": 1,
+            "page_size": 50,  # 获取最近 50 条动态
+            "task_id": task_id,
+            "type": "ALL"
+        }
+
+        try:
+            resp = self._session.post(url, json=payload, headers=self._headers, timeout=10)
+            resp.raise_for_status()
+            res_json = resp.json()
+
+            if res_json.get("code") != 200:
+                return {"net_change": 0, "active_volume": 0}
+
+            trades = res_json.get("data", {}).get("trades", [])
+
+            net_change = 0
+            active_volume = 0
+
+            for trade in trades:
+                # 只关心我们要狙击的那把枪
+                if str(trade.get("good_id")) == str(target_good_id):
+                    count = int(trade.get("count", 0))
+                    trade_type = trade.get("type")
+
+                    # ==========================================
+                    # V4.0 官方枚举逻辑 (筹码真实流向判定)
+                    # ==========================================
+                    # 4: 取出组件 (锁死筹码离开市场，庄家吸筹)
+                    # 7: 卖出/存入组件 (推向市场准备套现，庄家抛售)
+                    # 0(默认) 和 5(CD恢复) 作为无实质转移被忽略
+
+                    if trade_type == 4:
+                        net_change += count  # 净流入增加 (看涨)
+                    elif trade_type == 7:
+                        net_change -= count  # 净流入减少 (看跌)
+
+                    # 只要是 4 或 7，都算作有效活跃度
+                    if trade_type in (4, 7):
+                        active_volume += count
+
+            return {"net_change": net_change, "active_volume": active_volume}
+
+        except Exception as exc:
+            logger.error("Failed to fetch dynamics for task_id %s: %s", task_id, exc)
+            return {"net_change": 0, "active_volume": 0}
