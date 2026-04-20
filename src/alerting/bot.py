@@ -32,9 +32,10 @@ class DingTalkAlerter:
         When ``None`` (default), the bare URL is used without signing.
     """
 
-    def __init__(self, webhook_url: str, secret: str | None = None) -> None:
+    def __init__(self, webhook_url: str, secret: str | None = None, timeout: int = 5) -> None:
         self._webhook_url = webhook_url
         self._secret = secret
+        self._timeout = timeout
 
     # ------------------------------------------------------------------
     # Public API
@@ -65,7 +66,7 @@ class DingTalkAlerter:
                 url,
                 data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
                 headers={"Content-Type": "application/json; charset=utf-8"},
-                timeout=5,
+                timeout=self._timeout,
             )
         except Exception as exc:  # noqa: BLE001
             logger.error("DingTalk network error: %s", exc)

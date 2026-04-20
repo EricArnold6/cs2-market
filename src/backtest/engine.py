@@ -29,6 +29,28 @@ from src.strategy.signal import generate_signals
 from src.backtest.models import Trade, BacktestResult
 
 
+def load_backtest_cfg(settings: dict) -> dict:
+    """Extract backtest defaults from the top-level settings dict.
+
+    Usage example::
+
+        cfg = load_backtest_cfg(settings)
+        result = run_backtest(history, **cfg)
+
+    Args:
+        settings: The full settings dict loaded from ``config/settings.json``.
+
+    Returns:
+        A dict with keys ``initial_capital`` and ``transaction_cost`` ready
+        to be unpacked into :func:`run_backtest`.
+    """
+    bt = settings.get("backtest", {})
+    return {
+        "initial_capital":  bt.get("initial_capital",  1000.0),
+        "transaction_cost": bt.get("transaction_cost", 0.15),
+    }
+
+
 def run_backtest(
     history: ItemHistory,
     initial_capital: float = 1000.0,

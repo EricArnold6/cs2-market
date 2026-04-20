@@ -17,7 +17,7 @@ from src.analysis.prediction.predictor import MultiFactorPredictor
 logger = logging.getLogger(__name__)
 
 _MIN_ROWS = 18
-_FEATURE_COLS = ["obi", "spread_ratio", "sdr", "price_momentum_dev", "platform_spread", "lease_roi", "price_volatility"]
+_FEATURE_COLS = ["obi", "spread_ratio", "sdr", "price_momentum_dev", "platform_spread", "price_volatility"]
 _EVAL_COLS = _FEATURE_COLS + ["obi_z", "sdr_z", "spread_z"]
 
 _SQL = """
@@ -43,6 +43,7 @@ class MarketAnomalyDetector:
         arb = cfg.get("arbitrage", {})
         filt = cfg.get("accumulation_filter", {})
         whale_cfg = cfg.get("whale", {})
+        model_cfg = cfg.get("model", {})
 
         # Z-Score 阈值
         self._accum_obi_z   = z.get("accumulation_obi_z", 1.8)
@@ -57,8 +58,18 @@ class MarketAnomalyDetector:
         self._spread_min    = filt.get("spread_ratio_min", 0.0)
         self._volatility_max = filt.get("volatility_max", 0.05)
 
+        # IsolationForest 模型参数
+        self._if_n_estimators  = model_cfg.get("n_estimators", 100)
+        self._if_contamination = model_cfg.get("contamination", 0.05)
+        self._if_random_state  = model_cfg.get("random_state", 42)
+        # 数据窗口与 V5.0 预筛参数
+        self._lookback_hours      = model_cfg.get("lookback_hours", 24)
+        self._pre_filter_obi_z    = model_cfg.get("pre_filter_obi_z", 1.2)
+        self._kline_lookback      = model_cfg.get("kline_lookback", 6)
+        self._whale_ranking_limit = model_cfg.get("whale_ranking_limit", 10)
+
         self._whale_tracker = WhaleTracker(client, whale_cfg)
-        self._predictor = MultiFactorPredictor()
+        self._predictor = MultiFactorPredictor(cfg=cfg.get("prediction"))
 
         user = db_config.get("user")
         password = db_config.get("password")
@@ -69,7 +80,8 @@ class MarketAnomalyDetector:
         self._engine = create_engine(self._engine_uri)
 
     # ... (fetch_recent_data 和 engineer_features 保持不变) ...
-    def fetch_recent_data(self, item_nameid: int, hours: int = 24) -> pd.DataFrame:
+    def fetch_recent_data(self, item_nameid: int, hours: int | None = None) -> pd.DataFrame:
+        hours = hours if hours is not None else self._lookback_hours
         cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=hours)
         with self._engine.connect() as conn:
             return pd.read_sql_query(
@@ -95,7 +107,11 @@ class MarketAnomalyDetector:
 
         X = df_clean[_FEATURE_COLS].values
 
-        model = IsolationForest(n_estimators=100, contamination=0.05, random_state=42)
+        model = IsolationForest(
+            n_estimators=self._if_n_estimators,
+            contamination=self._if_contamination,
+            random_state=self._if_random_state,
+        )
         labels = model.fit_predict(X)
         scores = model.score_samples(X)
 
@@ -145,7 +161,7 @@ class MarketAnomalyDetector:
             if platform_spread > self._arb_spread:
                 signal_type = "ARBITRAGE_OPPORTUNITY"
 
-            elif obi_z > 1.2 and float(last_row["obi"]) > 0:
+            elif obi_z > self._pre_filter_obi_z and float(last_row["obi"]) > 0:
                 logger.info(
                     "ID %s 突破 V5.0 初筛阈值 (obi_z=%.2f)，启动多因子预测引擎...",
                     item_nameid, obi_z,
@@ -154,14 +170,14 @@ class MarketAnomalyDetector:
                 # ── 提取 K线成交量因子 ──────────────────────────────────
                 klines = self._client.fetch_kline_data(item_nameid, periods="1hour")
                 vol_ratio = 1.0
-                if klines and len(klines) >= 6:
-                    recent_vols = [float(k.get("v", 0)) for k in klines[-6:-1]]
+                if klines and len(klines) >= self._kline_lookback:
+                    recent_vols = [float(k.get("v", 0)) for k in klines[-self._kline_lookback:-1]]
                     avg_vol = sum(recent_vols) / len(recent_vols) if recent_vols else 1.0
                     curr_vol = float(klines[-1].get("v", 0))
                     vol_ratio = curr_vol / (avg_vol + 1e-6)
 
                 # ── 提取巨鲸筹码因子 ────────────────────────────────────
-                top_holders = self._client.fetch_whale_ranking(item_nameid, limit=10)
+                top_holders = self._client.fetch_whale_ranking(item_nameid, limit=self._whale_ranking_limit)
                 total_net_flow = 0
                 total_active = 0
                 total_lock = 0
@@ -241,10 +257,10 @@ class MarketAnomalyDetector:
     def _verify_volume_breakout(self, csqaq_id: int, signal_type: str) -> bool:
         """K线真实成交量校验"""
         klines = self._client.fetch_kline_data(csqaq_id, periods="1hour")
-        if not klines or len(klines) < 6:
+        if not klines or len(klines) < self._kline_lookback:
             return True
 
-        recent_vols = [float(k.get("v", 0)) for k in klines[-6:-1]]
+        recent_vols = [float(k.get("v", 0)) for k in klines[-self._kline_lookback:-1]]
         avg_vol = sum(recent_vols) / len(recent_vols) if recent_vols else 1.0
         curr_vol = float(klines[-1].get("v", 0))
 

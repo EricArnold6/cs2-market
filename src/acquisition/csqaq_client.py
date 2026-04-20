@@ -23,6 +23,7 @@ class CSQAQClient:
         cache: Optional[_NameIdCache] = None,
         base_url_public: str = "",
         base_url_vip: str = "",
+        api_cfg: Optional[dict] = None,
     ) -> None:
         """
         初始化客户端
@@ -30,10 +31,19 @@ class CSQAQClient:
         :param vip_token:       CSQAQ VIP 接口 ApiToken
         :param base_url_public: 公共 API 域名（默认从 settings.json 注入）
         :param base_url_vip:    VIP API 域名（默认从 settings.json 注入）
+        :param api_cfg:         网络参数配置（来自 settings["api"]）
         """
         self.BASE_URL_PUBLIC = base_url_public
         self.BASE_URL_VIP    = base_url_vip
         self._cache = cache if cache is not None else _NameIdCache()
+
+        c = api_cfg or {}
+        self._rate_limit_sleep = c.get("rate_limit_sleep_s", 1.1)
+        self._retry_sleep      = c.get("retry_sleep_s", 2.0)
+        self._max_retries      = c.get("max_retries", 3)
+        self._chunk_size       = c.get("batch_chunk_size", 50)
+        self._timeout          = c.get("timeout_s", 10)
+        self._batch_timeout    = c.get("batch_timeout_s", 15)
 
         self._session = requests.Session()
 
@@ -65,12 +75,12 @@ class CSQAQClient:
         params = {"text": item_name}
 
         try:
-            time.sleep(1.1)  # respect 1 req/s rate limit
-            for _attempt in range(3):
-                resp = self._session.get(url, params=params, headers=self._headers_public, timeout=10)
+            time.sleep(self._rate_limit_sleep)  # respect rate limit
+            for _attempt in range(self._max_retries):
+                resp = self._session.get(url, params=params, headers=self._headers_public, timeout=self._timeout)
                 if resp.status_code == 429:
-                    logger.warning("resolve_item_nameid: 429 rate-limited, retrying in 2s (attempt %d/3)", _attempt + 1)
-                    time.sleep(2.0)
+                    logger.warning("resolve_item_nameid: 429 rate-limited, retrying in %.1fs (attempt %d/%d)", self._retry_sleep, _attempt + 1, self._max_retries)
+                    time.sleep(self._retry_sleep)
                     continue
                 break
             resp.raise_for_status()
@@ -103,19 +113,19 @@ class CSQAQClient:
         url = f"{self.BASE_URL_PUBLIC}/goods/getPriceByMarketHashName"
         snapshots = []
 
-        chunk_size = 50
+        chunk_size = self._chunk_size
         for idx, i in enumerate(range(0, len(market_hash_names), chunk_size)):
             if idx > 0:
-                time.sleep(1.1)  # respect 1 req/s rate limit between chunks
+                time.sleep(self._rate_limit_sleep)  # respect rate limit between chunks
             chunk = market_hash_names[i:i + chunk_size]
             payload = {"marketHashNameList": chunk}
 
             try:
-                for _attempt in range(3):
-                    resp = self._session.post(url, json=payload, headers=self._headers_public, timeout=15)
+                for _attempt in range(self._max_retries):
+                    resp = self._session.post(url, json=payload, headers=self._headers_public, timeout=self._batch_timeout)
                     if resp.status_code == 429:
-                        logger.warning("fetch_batch_prices: 429 rate-limited, retrying in 2s (attempt %d/3)", _attempt + 1)
-                        time.sleep(2.0)
+                        logger.warning("fetch_batch_prices: 429 rate-limited, retrying in %.1fs (attempt %d/%d)", self._retry_sleep, _attempt + 1, self._max_retries)
+                        time.sleep(self._retry_sleep)
                         continue
                     break
                 resp.raise_for_status()
@@ -169,7 +179,7 @@ class CSQAQClient:
         }
 
         try:
-            resp = self._session.post(url, json=payload, headers=self._headers_vip, timeout=10)
+            resp = self._session.post(url, json=payload, headers=self._headers_vip, timeout=self._timeout)
             resp.raise_for_status()
             res_json = resp.json()
 
@@ -191,7 +201,7 @@ class CSQAQClient:
         payload = {"good_id": str(csqaq_id)}
 
         try:
-            resp = self._session.post(url, json=payload, headers=self._headers_public, timeout=10)
+            resp = self._session.post(url, json=payload, headers=self._headers_public, timeout=self._timeout)
             resp.raise_for_status()
             res_json = resp.json()
 
@@ -222,7 +232,7 @@ class CSQAQClient:
         }
 
         try:
-            resp = self._session.post(url, json=payload, headers=self._headers_public, timeout=10)
+            resp = self._session.post(url, json=payload, headers=self._headers_public, timeout=self._timeout)
             resp.raise_for_status()
             res_json = resp.json()
 

@@ -55,6 +55,15 @@ def _make_detector() -> MarketAnomalyDetector:
     detector._arb_spread     = 0.05
     detector._spread_min     = 0.0
     detector._volatility_max = 0.05
+    # IsolationForest model params (mirrors __init__ defaults)
+    detector._if_n_estimators  = 100
+    detector._if_contamination = 0.05
+    detector._if_random_state  = 42
+    # Data window & V5.0 filter params (mirrors __init__ defaults)
+    detector._lookback_hours      = 24
+    detector._pre_filter_obi_z    = 1.2
+    detector._kline_lookback      = 6
+    detector._whale_ranking_limit = 10
     # Default API stubs for V5 path
     detector._client.fetch_kline_data.return_value = []
     detector._client.fetch_whale_ranking.return_value = []
