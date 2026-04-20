@@ -13,10 +13,6 @@ from src.acquisition.exceptions import NameIdExtractionError
 logger = logging.getLogger(__name__)
 
 
-_DEFAULT_BASE_URL_PUBLIC = "https://api.csqaq.com/api/v1"
-_DEFAULT_BASE_URL_VIP    = "https://private-api.csqaq.com/api/v1"
-
-
 class CSQAQClient:
     """High-performance REST client for CSQAQ Data API."""
 
@@ -25,8 +21,8 @@ class CSQAQClient:
         api_token: str,
         vip_token: str = "",
         cache: Optional[_NameIdCache] = None,
-        base_url_public: str = _DEFAULT_BASE_URL_PUBLIC,
-        base_url_vip: str = _DEFAULT_BASE_URL_VIP,
+        base_url_public: str = "",
+        base_url_vip: str = "",
     ) -> None:
         """
         初始化客户端
@@ -191,11 +187,11 @@ class CSQAQClient:
         [POST] /api/v1/monitor/rank
         获取指定饰品的持仓大户排行榜。
         """
-        url = f"{self.BASE_URL}/monitor/rank"
+        url = f"{self.BASE_URL_PUBLIC}/monitor/rank"
         payload = {"good_id": str(csqaq_id)}
 
         try:
-            resp = self._session.post(url, json=payload, headers=self._headers, timeout=10)
+            resp = self._session.post(url, json=payload, headers=self._headers_public, timeout=10)
             resp.raise_for_status()
             res_json = resp.json()
 
@@ -217,7 +213,7 @@ class CSQAQClient:
         [POST] /api/v1/task/get_task_business
         获取单个大户近期的库存动态记录，并统计目标饰品的净流入/流出量。
         """
-        url = f"{self.BASE_URL}/task/get_task_business"
+        url = f"{self.BASE_URL_PUBLIC}/task/get_task_business"
         payload = {
             "page_index": 1,
             "page_size": 50,  # 获取最近 50 条动态
@@ -226,7 +222,7 @@ class CSQAQClient:
         }
 
         try:
-            resp = self._session.post(url, json=payload, headers=self._headers, timeout=10)
+            resp = self._session.post(url, json=payload, headers=self._headers_public, timeout=10)
             resp.raise_for_status()
             res_json = resp.json()
 

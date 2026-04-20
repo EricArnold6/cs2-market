@@ -35,9 +35,15 @@ def _make_df(
 
 
 def _make_detector() -> MarketAnomalyDetector:
-    """Return a detector whose DB layer is fully mocked."""
+    """Return a detector whose DB layer and API client are fully mocked."""
     detector = MarketAnomalyDetector.__new__(MarketAnomalyDetector)
     detector._db = MagicMock()
+    detector._client = MagicMock()
+    detector._whale_tracker = MagicMock()
+    detector._whale_tracker.calculate_accumulation_index.return_value = {
+        "status": "NEUTRAL",
+        "msg": "",
+    }
     return detector
 
 
@@ -162,7 +168,7 @@ class TestDetectorInsufficientData:
 
     def test_fewer_than_min_rows_returns_none(self):
         detector = _make_detector()
-        # Provide only 3 clean rows (below _MIN_ROWS=6)
+        # Provide only 3 clean rows (below _MIN_ROWS=18)
         df_small = _make_df(n=3)
         detector.fetch_recent_data = MagicMock(return_value=df_small)
         result = detector.detect_anomalies(item_nameid=1)
@@ -189,8 +195,8 @@ class TestDetectorPipeline:
         detector.fetch_recent_data = MagicMock(return_value=df)
 
         mock_forest = MagicMock()
-        mock_forest.fit_predict.return_value = [label] * len(df)
-        mock_forest.score_samples.return_value = [score] * len(df)
+        mock_forest.fit_predict.side_effect = lambda X: [label] * len(X)
+        mock_forest.score_samples.side_effect = lambda X: [score] * len(X)
 
         with patch(
             "src.analysis.anomaly.detector.IsolationForest",
@@ -199,29 +205,31 @@ class TestDetectorPipeline:
             return detector.detect_anomalies(item_nameid=1)
 
     def test_result_dict_has_expected_keys(self):
-        df = _make_df(n=25)
+        df = _make_df(n=40)
         result = self._run_with_mock_forest(df, label=1)
         assert result is not None
         expected_keys = {
-            "timestamp", "anomaly_score", "obi",
-            "sdr", "platform_spread", "lease_roi", "signal_type",
+            "timestamp", "anomaly_score", "obi", "spread_ratio",
+            "sdr", "price_momentum_dev", "platform_spread", "price_volatility",
+            "signal_type",
         }
         assert set(result.keys()) == expected_keys
 
     def test_all_normal_labels_give_normal_signal_type(self):
-        df = _make_df(n=25)
+        df = _make_df(n=40)
         result = self._run_with_mock_forest(df, label=1, score=-0.05)
         assert result is not None
         assert result["signal_type"] == "NORMAL"
 
     def test_connect_called_during_pipeline(self):
         detector = _make_detector()
-        df = _make_df(n=20)
+        df = _make_df(n=40)
         detector.fetch_recent_data = MagicMock(return_value=df)
 
         mock_forest = MagicMock()
-        mock_forest.fit_predict.return_value = [1] * 20
-        mock_forest.score_samples.return_value = [-0.1] * 20
+        # Use side_effect so the mock adapts to the actual post-dropna length
+        mock_forest.fit_predict.side_effect = lambda X: [1] * len(X)
+        mock_forest.score_samples.side_effect = lambda X: [-0.1] * len(X)
 
         with patch(
             "src.analysis.anomaly.detector.IsolationForest",
@@ -240,39 +248,44 @@ class TestEvaluateSignal:
 
     def _make_status(
         self,
-        sdr: float = 0.0,
         obi: float = 0.0,
+        obi_z: float = 0.0,
+        sdr_z: float = 0.0,
         platform_spread: float = 0.0,
-        lease_roi: float = 0.005,
+        spread_ratio: float = 0.0,
+        volatility: float = 0.02,
     ) -> pd.Series:
         return pd.Series(
             {
-                "sdr": sdr,
                 "obi": obi,
+                "obi_z": obi_z,
+                "sdr_z": sdr_z,
                 "platform_spread": platform_spread,
-                "lease_roi": lease_roi,
+                "spread_ratio": spread_ratio,
+                "price_volatility": volatility,
             }
         )
 
-    def test_accumulation_via_sdr_and_obi(self):
+    def test_accumulation_via_sdr_z_and_obi_z(self):
         detector = _make_detector()
-        status = self._make_status(sdr=0.20, obi=0.65)
+        # sdr_z > 2.0, obi_z > 2.5, obi > 0, spread_ratio >= 0, volatility < 0.05
+        status = self._make_status(obi=0.5, obi_z=3.0, sdr_z=3.0, spread_ratio=0.01, volatility=0.02)
         assert detector._evaluate_signal(status) == "ACCUMULATION"
 
-    def test_accumulation_via_platform_spread(self):
+    def test_arbitrage_opportunity_via_platform_spread(self):
         detector = _make_detector()
-        # platform_spread > 0.05 alone should trigger ACCUMULATION
+        # platform_spread > 0.05 → ARBITRAGE_OPPORTUNITY (checked first)
         status = self._make_status(platform_spread=0.08)
-        assert detector._evaluate_signal(status) == "ACCUMULATION"
+        assert detector._evaluate_signal(status) == "ARBITRAGE_OPPORTUNITY"
 
     def test_dump_risk_signal(self):
         detector = _make_detector()
-        # Strong sell pressure + near-zero lease ROI
-        status = self._make_status(obi=-0.70, lease_roi=0.0005)
+        # obi_z < -2.5, obi < 0, spread_ratio < -0.01
+        status = self._make_status(obi=-0.5, obi_z=-3.0, spread_ratio=-0.02)
         assert detector._evaluate_signal(status) == "DUMP_RISK"
 
     def test_irregular_signal(self):
         detector = _make_detector()
         # Neither condition met
-        status = self._make_status(sdr=0.05, obi=0.1, platform_spread=0.02, lease_roi=0.005)
+        status = self._make_status(obi=0.1, obi_z=0.5, sdr_z=0.3, platform_spread=0.02)
         assert detector._evaluate_signal(status) == "IRREGULAR"

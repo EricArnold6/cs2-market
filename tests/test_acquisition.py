@@ -1,82 +1,21 @@
 """
-Unit tests for src/acquisition — http_client, cache, initializer, models.
+Unit tests for src/acquisition — cache, models, CSQAQClient.
 
 All tests use unittest.mock exclusively — no real HTTP requests are made.
 """
 
 import json
 import tempfile
-import time
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.acquisition.http_client import (
-    SteamOrderBookFetcher,
-    _USER_AGENTS,
-    NameIdExtractionError,
-    NameIdNotInitializedError,
-)
+from src.acquisition.exceptions import NameIdExtractionError
 from src.acquisition.cache import _NameIdCache
 from src.acquisition.initializer import NameIdInitializer, InitResult
 from src.acquisition.models import OrderBook
-
-# ---------------------------------------------------------------------------
-# Shared fixtures / fake data
-# ---------------------------------------------------------------------------
-
-FAKE_ORDERBOOK_RESPONSE = {
-    "success": 1,
-    "sell_order_count": "1,234",
-    "buy_order_count": "567",
-    "sell_order_graph": [
-        [10.50, 3, "3 orders"],
-        [10.75, 7, "7 orders"],
-        [11.00, 5, "5 orders"],
-        [11.25, 2, "2 orders"],
-        [11.50, 4, "4 orders"],
-        [12.00, 8, "8 orders"],
-    ],
-    "buy_order_graph": [
-        [10.00, 6, "6 orders"],
-        [9.75, 4, "4 orders"],
-        [9.50, 9, "9 orders"],
-        [9.25, 1, "1 order"],
-        [9.00, 3, "3 orders"],
-        [8.75, 2, "2 orders"],
-    ],
-}
-
-FAKE_LISTING_HTML = (
-    "<html><body>"
-    "<script>Market_LoadOrderSpread(176923345);</script>"
-    "</body></html>"
-)
-
-
-@pytest.fixture
-def tmp_cache(tmp_path):
-    """Return a _NameIdCache backed by an isolated temp directory."""
-    return _NameIdCache(cache_path=tmp_path / "nameid_cache.json")
-
-
-@pytest.fixture
-def mock_session():
-    """A MagicMock requests.Session that returns 200 + fake data by default."""
-    sess = MagicMock()
-    resp = MagicMock()
-    resp.status_code = 200
-    resp.json.return_value = FAKE_ORDERBOOK_RESPONSE
-    resp.text = FAKE_LISTING_HTML
-    sess.get.return_value = resp
-    return sess
-
-
-@pytest.fixture
-def fetcher(tmp_cache, mock_session):
-    """SteamOrderBookFetcher with injected mock session and temp cache."""
-    return SteamOrderBookFetcher(session=mock_session, cache=tmp_cache)
+from src.acquisition.csqaq_client import CSQAQClient
 
 
 # ===========================================================================
@@ -84,6 +23,11 @@ def fetcher(tmp_cache, mock_session):
 # ===========================================================================
 
 class TestNameIdCache:
+
+    @pytest.fixture
+    def tmp_cache(self, tmp_path):
+        """Return a _NameIdCache backed by an isolated temp directory."""
+        return _NameIdCache(cache_path=tmp_path / "nameid_cache.json")
 
     def test_cache_miss_returns_none(self, tmp_cache):
         """Cache miss returns None for unknown item."""
@@ -103,8 +47,9 @@ class TestNameIdCache:
         assert c2.get("Glock-18 | Fade (Factory New)") == 999
 
     def test_cache_loads_existing_file(self, tmp_path):
-        """_NameIdCache loads pre-existing JSON on construction."""
+        """_NameIdCache loads pre-existing JSON on construction (v1 compat format)."""
         cache_path = tmp_path / "nameid_cache.json"
+        # Write v1 flat format — backwards compat should handle it
         cache_path.write_text(json.dumps({"item": 42}), encoding="utf-8")
         c = _NameIdCache(cache_path)
         assert c.get("item") == 42
@@ -118,264 +63,14 @@ class TestNameIdCache:
 
 
 # ===========================================================================
-# Group B — _parse_order_book pure function (9 tests)
-# ===========================================================================
-
-class TestParseOrderBook:
-
-    def test_lowest_ask_price(self):
-        ob = SteamOrderBookFetcher._parse_order_book("item", FAKE_ORDERBOOK_RESPONSE)
-        assert ob.lowest_ask_price == 10.50
-
-    def test_highest_bid_price(self):
-        ob = SteamOrderBookFetcher._parse_order_book("item", FAKE_ORDERBOOK_RESPONSE)
-        assert ob.highest_bid_price == 10.00
-
-    def test_ask_volume_top5(self):
-        """Top-5 ask volumes: 3+7+5+2+4 = 21."""
-        ob = SteamOrderBookFetcher._parse_order_book("item", FAKE_ORDERBOOK_RESPONSE)
-        assert ob.ask_volume_top5 == 21
-
-    def test_bid_volume_top5(self):
-        """Top-5 bid volumes: 6+4+9+1+3 = 23."""
-        ob = SteamOrderBookFetcher._parse_order_book("item", FAKE_ORDERBOOK_RESPONSE)
-        assert ob.bid_volume_top5 == 23
-
-    def test_total_sell_orders_parses_comma(self):
-        """'1,234' sell orders → 1234."""
-        ob = SteamOrderBookFetcher._parse_order_book("item", FAKE_ORDERBOOK_RESPONSE)
-        assert ob.total_sell_orders == 1234
-
-    def test_total_buy_orders(self):
-        ob = SteamOrderBookFetcher._parse_order_book("item", FAKE_ORDERBOOK_RESPONSE)
-        assert ob.total_buy_orders == 567
-
-    def test_timestamp_is_int(self):
-        ob = SteamOrderBookFetcher._parse_order_book("item", FAKE_ORDERBOOK_RESPONSE)
-        assert isinstance(ob.timestamp, int)
-
-    def test_empty_graphs_return_zeros(self):
-        """Completely empty response must not crash; all numeric fields are 0."""
-        ob = SteamOrderBookFetcher._parse_order_book("item", {})
-        assert ob.lowest_ask_price == 0.0
-        assert ob.highest_bid_price == 0.0
-        assert ob.ask_volume_top5 == 0
-        assert ob.bid_volume_top5 == 0
-        assert ob.total_sell_orders == 0
-        assert ob.total_buy_orders == 0
-
-    def test_fewer_than_5_levels_no_crash(self):
-        """Only 2 levels in each graph — must not raise IndexError."""
-        data = {
-            "sell_order_graph": [[5.0, 2, ""], [6.0, 3, ""]],
-            "buy_order_graph": [[4.0, 1, ""]],
-            "sell_order_count": "5",
-            "buy_order_count": "1",
-        }
-        ob = SteamOrderBookFetcher._parse_order_book("item", data)
-        assert ob.ask_volume_top5 == 5   # 2+3
-        assert ob.bid_volume_top5 == 1
-
-
-# ===========================================================================
-# Group C — resolve_item_nameid (4 tests)
-# ===========================================================================
-
-class TestResolveItemNameid:
-
-    def test_cache_hit_skips_http(self, tmp_cache, mock_session):
-        """Cache hit should result in zero HTTP calls."""
-        tmp_cache.set("AK-47 | Redline (Field-Tested)", 176923345)
-        f = SteamOrderBookFetcher(session=mock_session, cache=tmp_cache)
-        result = f.resolve_item_nameid("AK-47 | Redline (Field-Tested)")
-        assert result == 176923345
-        mock_session.get.assert_not_called()
-
-    def test_cache_miss_fetches_html(self, tmp_cache, mock_session):
-        """Cache miss triggers an HTTP request and parses the nameid."""
-        f = SteamOrderBookFetcher(session=mock_session, cache=tmp_cache)
-        result = f.resolve_item_nameid("AK-47 | Redline (Field-Tested)")
-        assert result == 176923345
-        mock_session.get.assert_called_once()
-
-    def test_second_call_uses_cache(self, tmp_cache, mock_session):
-        """Second call for same item must not make additional HTTP requests."""
-        f = SteamOrderBookFetcher(session=mock_session, cache=tmp_cache)
-        f.resolve_item_nameid("AK-47 | Redline (Field-Tested)")
-        f.resolve_item_nameid("AK-47 | Redline (Field-Tested)")
-        assert mock_session.get.call_count == 1
-
-    def test_no_match_raises_nameid_extraction_error(self, tmp_cache, mock_session):
-        """HTML without Market_LoadOrderSpread must raise NameIdExtractionError."""
-        mock_session.get.return_value.text = "<html>no match here</html>"
-        f = SteamOrderBookFetcher(session=mock_session, cache=tmp_cache)
-        with pytest.raises(NameIdExtractionError):
-            f.resolve_item_nameid("Unknown Item")
-
-
-# ===========================================================================
-# Group D — fetch_order_book (5 tests)
-# ===========================================================================
-
-class TestFetchOrderBook:
-
-    def test_returns_orderbook_instance(self, fetcher, tmp_cache):
-        """fetch_order_book must return an OrderBook."""
-        tmp_cache.set("AK-47 | Redline (Field-Tested)", 176923345)
-        result = fetcher.fetch_order_book("AK-47 | Redline (Field-Tested)")
-        assert isinstance(result, OrderBook)
-
-    def test_request_params_contain_nameid(self, fetcher, tmp_cache, mock_session):
-        """The HTTP request must include item_nameid in its parameters."""
-        tmp_cache.set("AK-47 | Redline (Field-Tested)", 176923345)
-        fetcher.fetch_order_book("AK-47 | Redline (Field-Tested)")
-        # The last call should be the orderbook call (after possible nameid call)
-        last_call_kwargs = mock_session.get.call_args
-        params = last_call_kwargs[1].get("params") or last_call_kwargs[0][1] if len(last_call_kwargs[0]) > 1 else last_call_kwargs[1].get("params", {})
-        # params may be in kwargs
-        if last_call_kwargs.kwargs:
-            params = last_call_kwargs.kwargs.get("params", {})
-        else:
-            params = {}
-            for c in mock_session.get.call_args_list:
-                if c.kwargs.get("params"):
-                    params = c.kwargs["params"]
-        assert params.get("item_nameid") == 176923345
-
-    def test_429_retry_succeeds(self, tmp_cache, mock_session):
-        """A single 429 followed by 200 should succeed after retry."""
-        tmp_cache.set("AK-47 | Redline (Field-Tested)", 176923345)
-
-        resp_429 = MagicMock()
-        resp_429.status_code = 429
-
-        resp_200 = MagicMock()
-        resp_200.status_code = 200
-        resp_200.json.return_value = FAKE_ORDERBOOK_RESPONSE
-        resp_200.text = FAKE_LISTING_HTML
-
-        mock_session.get.side_effect = [resp_429, resp_200]
-        f = SteamOrderBookFetcher(session=mock_session, cache=tmp_cache)
-
-        with patch("src.acquisition.http_client.time.sleep"):
-            result = f.fetch_order_book("AK-47 | Redline (Field-Tested)")
-        assert isinstance(result, OrderBook)
-
-    def test_too_many_429_raises_runtime_error(self, tmp_cache, mock_session):
-        """Exceeding _RETRY_MAX 429 responses must raise RuntimeError."""
-        tmp_cache.set("AK-47 | Redline (Field-Tested)", 176923345)
-
-        resp_429 = MagicMock()
-        resp_429.status_code = 429
-        mock_session.get.return_value = resp_429
-
-        f = SteamOrderBookFetcher(session=mock_session, cache=tmp_cache)
-        with patch("src.acquisition.http_client.time.sleep"):
-            with pytest.raises(RuntimeError):
-                f.fetch_order_book("AK-47 | Redline (Field-Tested)")
-
-    def test_user_agent_in_known_list(self, tmp_cache, mock_session):
-        """The User-Agent header sent must be one of the known UA strings."""
-        tmp_cache.set("AK-47 | Redline (Field-Tested)", 176923345)
-        fetcher = SteamOrderBookFetcher(session=mock_session, cache=tmp_cache)
-        fetcher.fetch_order_book("AK-47 | Redline (Field-Tested)")
-        # Find the headers used in any get() call
-        used_ua = None
-        for c in mock_session.get.call_args_list:
-            headers = c.kwargs.get("headers") or {}
-            if "User-Agent" in headers:
-                used_ua = headers["User-Agent"]
-        assert used_ua in _USER_AGENTS
-
-
-# ===========================================================================
-# Group E — fetch_multiple (3 tests)
-# ===========================================================================
-
-class TestFetchMultiple:
-
-    def test_returns_correct_length(self, tmp_cache, mock_session):
-        """fetch_multiple returns one OrderBook per item name."""
-        tmp_cache.set("Item A", 111)
-        tmp_cache.set("Item B", 222)
-        f = SteamOrderBookFetcher(session=mock_session, cache=tmp_cache)
-        with patch("src.acquisition.http_client.time.sleep"):
-            results = f.fetch_multiple(["Item A", "Item B"])
-        assert len(results) == 2
-
-    def test_sleep_called_between_items(self, tmp_cache, mock_session):
-        """sleep() must be called exactly (n-1) times for n items."""
-        for i, name in enumerate(["Item A", "Item B", "Item C"]):
-            tmp_cache.set(name, i + 100)
-        f = SteamOrderBookFetcher(session=mock_session, cache=tmp_cache)
-        with patch("src.acquisition.http_client.time.sleep") as mock_sleep:
-            f.fetch_multiple(["Item A", "Item B", "Item C"])
-        assert mock_sleep.call_count == 2
-
-    def test_single_item_failure_skipped(self, tmp_cache, mock_session):
-        """A failure on one item must not propagate; other items are returned."""
-        tmp_cache.set("Good Item", 111)
-        tmp_cache.set("Bad Item", 222)
-
-        good_resp = MagicMock()
-        good_resp.status_code = 200
-        good_resp.json.return_value = FAKE_ORDERBOOK_RESPONSE
-        good_resp.text = FAKE_LISTING_HTML
-
-        bad_resp = MagicMock()
-        bad_resp.status_code = 500
-        bad_resp.raise_for_status.side_effect = Exception("Server error")
-
-        # First item ("Good Item") uses good_resp; second ("Bad Item") uses bad_resp
-        mock_session.get.side_effect = [good_resp, bad_resp]
-
-        f = SteamOrderBookFetcher(session=mock_session, cache=tmp_cache)
-        with patch("src.acquisition.http_client.time.sleep"):
-            results = f.fetch_multiple(["Good Item", "Bad Item"])
-        assert len(results) == 1
-        assert results[0].item_name == "Good Item"
-
-
-# ===========================================================================
-# Group F — OrderBook computed properties (3 tests)
-# ===========================================================================
-
-class TestOrderBookProperties:
-
-    def _make_ob(self, ask, bid):
-        return OrderBook(
-            item_name="test",
-            timestamp=int(time.time()),
-            lowest_ask_price=ask,
-            highest_bid_price=bid,
-            ask_volume_top5=10,
-            bid_volume_top5=10,
-            total_buy_orders=100,
-            total_sell_orders=100,
-        )
-
-    def test_spread(self):
-        ob = self._make_ob(ask=10.50, bid=10.00)
-        assert ob.spread == pytest.approx(0.50, abs=1e-4)
-
-    def test_mid_price(self):
-        ob = self._make_ob(ask=10.50, bid=10.00)
-        assert ob.mid_price == pytest.approx(10.25, abs=1e-4)
-
-    def test_zero_when_one_side_empty(self):
-        ob_no_ask = self._make_ob(ask=0.0, bid=10.00)
-        assert ob_no_ask.spread == 0.0
-        assert ob_no_ask.mid_price == 0.0
-        ob_no_bid = self._make_ob(ask=10.00, bid=0.0)
-        assert ob_no_bid.spread == 0.0
-        assert ob_no_bid.mid_price == 0.0
-
-
-# ===========================================================================
 # Group H — _NameIdCache.load_from_dict() (10 tests)
 # ===========================================================================
 
 class TestNameIdCacheLoadFromDict:
+
+    @pytest.fixture
+    def tmp_cache(self, tmp_path):
+        return _NameIdCache(cache_path=tmp_path / "nameid_cache.json")
 
     def test_load_basic(self, tmp_cache):
         """load_from_dict({"K": 1}) → cache.get("K") == 1, returns 1."""
@@ -445,218 +140,135 @@ class TestNameIdCacheLoadFromDict:
 
 
 # ===========================================================================
-# Group I — resolve_item_nameid() HTML path hardening (5 tests)
+# Group C — CSQAQClient unit tests (7 tests)
 # ===========================================================================
 
-class TestResolveItemNameidHTMLPath:
-
-    def test_resolve_sends_html_headers(self, tmp_cache, mock_session):
-        """_request is called with extra_headers containing the 'Accept' key."""
-        f = SteamOrderBookFetcher(session=mock_session, cache=tmp_cache)
-        with patch.object(f, "_request", wraps=f._request) as mock_req:
-            f.resolve_item_nameid("AK-47 | Redline (Field-Tested)")
-        mock_req.assert_called_once()
-        _, kwargs = mock_req.call_args
-        extra = kwargs.get("extra_headers") or mock_req.call_args.args[2] if len(mock_req.call_args.args) > 2 else None
-        # extra_headers may be positional or keyword
-        call_args = mock_req.call_args
-        extra_headers = call_args.kwargs.get("extra_headers")
-        assert extra_headers is not None
-        assert "Accept" in extra_headers
-
-    def test_resolve_handles_whitespace(self, tmp_cache, mock_session):
-        """Regex should match even when spaces surround the nameid."""
-        mock_session.get.return_value.text = (
-            "<script>Market_LoadOrderSpread(  42  );</script>"
-        )
-        f = SteamOrderBookFetcher(session=mock_session, cache=tmp_cache)
-        result = f.resolve_item_nameid("Some Item")
-        assert result == 42
-
-    def test_resolve_raises_nameid_extraction_error(self, tmp_cache, mock_session):
-        """No match in HTML raises NameIdExtractionError, not ValueError."""
-        mock_session.get.return_value.text = "<html>nothing here</html>"
-        f = SteamOrderBookFetcher(session=mock_session, cache=tmp_cache)
-        with pytest.raises(NameIdExtractionError):
-            f.resolve_item_nameid("Unknown Item")
-
-    def test_resolve_url_encodes_pipe(self, tmp_cache, mock_session):
-        """Item name with '|' should appear URL-encoded in the request URL."""
-        f = SteamOrderBookFetcher(session=mock_session, cache=tmp_cache)
-        f.resolve_item_nameid("AK-47 | Redline (Field-Tested)")
-        called_url = mock_session.get.call_args.args[0]
-        # %7C is the percent-encoded '|'; some encoders may use upper or lower
-        assert "%7C" in called_url or "%7c" in called_url
-
-    def test_resolve_caches_on_success(self, tmp_cache, mock_session):
-        """After a successful HTML resolution, a second call makes no HTTP request."""
-        f = SteamOrderBookFetcher(session=mock_session, cache=tmp_cache)
-        f.resolve_item_nameid("AK-47 | Redline (Field-Tested)")
-        assert mock_session.get.call_count == 1
-        f.resolve_item_nameid("AK-47 | Redline (Field-Tested)")
-        assert mock_session.get.call_count == 1  # still 1 — no new HTTP call
+def _make_client(tmp_path=None) -> CSQAQClient:
+    """Return a CSQAQClient with isolated cache and mocked session."""
+    cache = None
+    if tmp_path is not None:
+        cache = _NameIdCache(cache_path=tmp_path / "nameid_cache.json")
+    client = CSQAQClient(
+        api_token="TEST_API_TOKEN",
+        vip_token="TEST_VIP_TOKEN",
+        cache=cache,
+        base_url_public="https://api.test.com/api/v1",
+        base_url_vip="https://vip.test.com/api/v1",
+    )
+    client._session = MagicMock()
+    return client
 
 
-# ===========================================================================
-# Group J — fetch_order_book() strict guard (4 tests)
-# ===========================================================================
+class TestCSQAQClientConstructor:
 
-class TestFetchOrderBookGuard:
+    def test_base_url_public_stored(self):
+        client = _make_client()
+        assert client.BASE_URL_PUBLIC == "https://api.test.com/api/v1"
 
-    def test_fetch_raises_if_not_initialized(self, tmp_cache, mock_session):
-        """Calling fetch_order_book without pre-loading the cache raises NameIdNotInitializedError."""
-        f = SteamOrderBookFetcher(session=mock_session, cache=tmp_cache)
-        with pytest.raises(NameIdNotInitializedError):
-            f.fetch_order_book("AK-47 | Redline (Field-Tested)")
+    def test_base_url_vip_stored(self):
+        client = _make_client()
+        assert client.BASE_URL_VIP == "https://vip.test.com/api/v1"
 
-    def test_fetch_does_not_call_resolve(self, tmp_cache, mock_session):
-        """When cache is empty, fetch_order_book must NOT call resolve_item_nameid."""
-        f = SteamOrderBookFetcher(session=mock_session, cache=tmp_cache)
-        with patch.object(f, "resolve_item_nameid") as mock_resolve:
-            with pytest.raises(NameIdNotInitializedError):
-                f.fetch_order_book("AK-47 | Redline (Field-Tested)")
-        mock_resolve.assert_not_called()
+    def test_headers_public_use_api_token(self):
+        client = _make_client()
+        assert client._headers_public["ApiToken"] == "TEST_API_TOKEN"
 
-    def test_fetch_succeeds_after_preload(self, tmp_cache, mock_session):
-        """After load_from_dict preloads the cache, fetch_order_book returns OrderBook."""
-        tmp_cache.load_from_dict({"AK-47 | Redline (Field-Tested)": 176923345})
-        f = SteamOrderBookFetcher(session=mock_session, cache=tmp_cache)
-        result = f.fetch_order_book("AK-47 | Redline (Field-Tested)")
-        assert isinstance(result, OrderBook)
-
-    def test_fetch_error_message_mentions_initializer(self, tmp_cache, mock_session):
-        """The NameIdNotInitializedError message must reference NameIdInitializer."""
-        f = SteamOrderBookFetcher(session=mock_session, cache=tmp_cache)
-        with pytest.raises(NameIdNotInitializedError) as exc_info:
-            f.fetch_order_book("AK-47 | Redline (Field-Tested)")
-        assert "NameIdInitializer" in str(exc_info.value)
+    def test_headers_vip_use_vip_token(self):
+        client = _make_client()
+        assert client._headers_vip["ApiToken"] == "TEST_VIP_TOKEN"
 
 
-# ===========================================================================
-# Group K — NameIdInitializer (9 tests)
-# ===========================================================================
+class TestCSQAQClientResolveNameid:
 
-class TestNameIdInitializer:
-
-    def _make_fetcher(self, tmp_cache, mock_session):
-        return SteamOrderBookFetcher(session=mock_session, cache=tmp_cache)
-
-    def test_init_skips_cached(self, tmp_cache, mock_session):
-        """All items already in cache → resolve_item_nameid not called; all in from_cache."""
-        tmp_cache.set("Item A", 111)
-        tmp_cache.set("Item B", 222)
-        f = self._make_fetcher(tmp_cache, mock_session)
-        initializer = NameIdInitializer(f, delay_min_s=0, delay_max_s=0)
-        with patch.object(f, "resolve_item_nameid") as mock_resolve:
-            result = initializer.run(["Item A", "Item B"])
-        mock_resolve.assert_not_called()
-        assert set(result.from_cache) == {"Item A", "Item B"}
-        assert result.resolved == []
-
-    def test_init_fetches_uncached(self, tmp_cache, mock_session):
-        """All 3 items are uncached → all appear in result.resolved."""
-        f = self._make_fetcher(tmp_cache, mock_session)
-        initializer = NameIdInitializer(f, delay_min_s=0, delay_max_s=0)
-        with patch("src.acquisition.http_client.time.sleep"):
-            result = initializer.run(["Item A", "Item B", "Item C"])
-        assert set(result.resolved) == {"Item A", "Item B", "Item C"}
-        assert result.failed == {}
-
-    def test_init_collects_failures(self, tmp_cache, mock_session):
-        """If the 2nd item raises, it lands in result.failed; 1st and 3rd succeed."""
-        f = self._make_fetcher(tmp_cache, mock_session)
-        initializer = NameIdInitializer(f, delay_min_s=0, delay_max_s=0)
-
-        call_count = [0]
-        def _side_effect(name):
-            call_count[0] += 1
-            if call_count[0] == 2:
-                raise RuntimeError("network error")
-            # Simulate a successful resolve that also writes to cache
-            tmp_cache.set(name, call_count[0])
-            return call_count[0]
-
-        with patch.object(f, "resolve_item_nameid", side_effect=_side_effect):
-            with patch("src.acquisition.http_client.time.sleep"):
-                result = initializer.run(["Item A", "Item B", "Item C"])
-
-        assert "Item B" in result.failed
-        assert "Item A" in result.resolved
-        assert "Item C" in result.resolved
-
-    def test_init_all_succeeded_true(self, tmp_cache, mock_session):
-        """When no failures, all_succeeded is True."""
-        f = self._make_fetcher(tmp_cache, mock_session)
-        initializer = NameIdInitializer(f, delay_min_s=0, delay_max_s=0)
-        with patch("src.acquisition.http_client.time.sleep"):
-            result = initializer.run(["Item A"])
-        assert result.all_succeeded is True
-
-    def test_init_all_succeeded_false(self, tmp_cache, mock_session):
-        """When there is at least one failure, all_succeeded is False."""
-        f = self._make_fetcher(tmp_cache, mock_session)
-        initializer = NameIdInitializer(f, delay_min_s=0, delay_max_s=0)
-        with patch.object(f, "resolve_item_nameid", side_effect=RuntimeError("fail")):
-            result = initializer.run(["Item A"])
-        assert result.all_succeeded is False
-
-    def test_init_delay_between_requests(self, tmp_cache, mock_session):
-        """3 items to fetch → sleep called exactly 2 times (not after last one)."""
-        f = self._make_fetcher(tmp_cache, mock_session)
-        initializer = NameIdInitializer(f, delay_min_s=0, delay_max_s=0)
-        with patch("src.acquisition.http_client.time.sleep") as mock_sleep:
-            result = initializer.run(["Item A", "Item B", "Item C"])
-        assert mock_sleep.call_count == 2
-
-    def test_init_no_delay_for_cache_hits(self, tmp_cache, mock_session):
-        """2 cached + 1 to fetch (last in to_fetch) → sleep called 0 times."""
-        tmp_cache.set("Item A", 111)
-        tmp_cache.set("Item B", 222)
-        f = self._make_fetcher(tmp_cache, mock_session)
-        initializer = NameIdInitializer(f, delay_min_s=0, delay_max_s=0)
-        with patch("src.acquisition.http_client.time.sleep") as mock_sleep:
-            # Item C is the only uncached item → it's both first and last in to_fetch
-            result = initializer.run(["Item A", "Item B", "Item C"])
-        assert mock_sleep.call_count == 0
-
-    def test_init_skip_cached_false_refetches(self, tmp_cache, mock_session):
-        """skip_cached=False means cached items are still passed to resolve_item_nameid."""
-        tmp_cache.set("Item A", 111)
-        f = self._make_fetcher(tmp_cache, mock_session)
-        initializer = NameIdInitializer(f, delay_min_s=0, delay_max_s=0)
-        with patch.object(f, "resolve_item_nameid", return_value=111) as mock_resolve:
-            result = initializer.run(["Item A"], skip_cached=False)
-        mock_resolve.assert_called_once_with("Item A")
-
-    def test_init_empty_list(self, tmp_cache, mock_session):
-        """run([]) returns an empty InitResult with zero HTTP calls."""
-        f = self._make_fetcher(tmp_cache, mock_session)
-        initializer = NameIdInitializer(f, delay_min_s=0, delay_max_s=0)
-        with patch.object(f, "resolve_item_nameid") as mock_resolve:
-            result = initializer.run([])
-        mock_resolve.assert_not_called()
-        assert result.resolved == []
-        assert result.from_cache == []
-        assert result.failed == {}
+    def test_cache_hit_returns_without_http(self, tmp_path):
+        """resolve_item_nameid returns cached value without any HTTP call."""
+        client = _make_client(tmp_path)
+        client.cache.set("AK-47 | Redline (Field-Tested)", 176923345)
+        result = client.resolve_item_nameid("AK-47 | Redline (Field-Tested)")
+        assert result == 176923345
+        client._session.get.assert_not_called()
 
 
-# ===========================================================================
-# Group L — _request() backward compatibility (2 tests)
-# ===========================================================================
+class TestCSQAQClientFetchBatchPrices:
 
-class TestRequestBackwardCompat:
+    def test_empty_list_returns_empty(self, tmp_path):
+        """fetch_batch_prices([]) must return [] without making HTTP calls."""
+        client = _make_client(tmp_path)
+        result = client.fetch_batch_prices([])
+        assert result == []
+        client._session.post.assert_not_called()
 
-    def test_request_no_extra_headers_default(self, tmp_cache, mock_session):
-        """Calling _request without extra_headers does not raise any error."""
-        f = SteamOrderBookFetcher(session=mock_session, cache=tmp_cache)
-        # Should succeed without extra_headers argument
-        resp = f._request("https://example.com", params=None)
-        assert resp is not None
+    def test_successful_response_returns_snapshots(self, tmp_path):
+        """A well-formed API response is parsed into OrderBookSnapshot objects."""
+        client = _make_client(tmp_path)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "code": 200,
+            "data": {
+                "success": {
+                    "AK-47 | Redline (Field-Tested)": {
+                        "marketHashName": "AK-47 | Redline (Field-Tested)",
+                        "buffSellPrice": "65.50",
+                        "buffBuyPrice": "64.00",
+                        "buffSellNum": "430",
+                        "buffBuyNum": "210",
+                        "yyypSellPrice": "64.00",
+                        "yyypLeasePrice": "0.30",
+                    }
+                },
+                "error": [],
+            },
+        }
+        client._session.post.return_value = mock_resp
+        results = client.fetch_batch_prices(["AK-47 | Redline (Field-Tested)"])
+        assert len(results) == 1
+        snap = results[0]
+        assert snap.item_name == "AK-47 | Redline (Field-Tested)"
+        assert snap.lowest_ask_price == pytest.approx(65.50)
+        assert snap.highest_bid_price == pytest.approx(64.00)
 
-    def test_request_extra_headers_merged(self, tmp_cache, mock_session):
-        """Extra headers passed to _request appear in the outgoing request."""
-        f = SteamOrderBookFetcher(session=mock_session, cache=tmp_cache)
-        f._request("https://example.com", params=None, extra_headers={"X-Test": "1"})
-        call_kwargs = mock_session.get.call_args.kwargs
-        headers_sent = call_kwargs.get("headers", {})
-        assert headers_sent.get("X-Test") == "1"
+
+class TestCSQAQClientWhaleAndInventory:
+
+    def test_fetch_whale_ranking_uses_public_url(self, tmp_path):
+        """fetch_whale_ranking must POST to BASE_URL_PUBLIC."""
+        client = _make_client(tmp_path)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"code": 200, "data": []}
+        client._session.post.return_value = mock_resp
+
+        client.fetch_whale_ranking(csqaq_id=12345)
+
+        called_url = client._session.post.call_args[0][0]
+        assert "api.test.com" in called_url
+        assert "vip.test.com" not in called_url
+
+    def test_fetch_whale_ranking_uses_public_headers(self, tmp_path):
+        """fetch_whale_ranking must use _headers_public, not _headers_vip."""
+        client = _make_client(tmp_path)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"code": 200, "data": []}
+        client._session.post.return_value = mock_resp
+
+        client.fetch_whale_ranking(csqaq_id=12345)
+
+        call_kwargs = client._session.post.call_args[1]
+        headers_used = call_kwargs.get("headers", {})
+        assert headers_used.get("ApiToken") == "TEST_API_TOKEN"
+
+    def test_fetch_user_inventory_dynamics_uses_public_url(self, tmp_path):
+        """fetch_user_inventory_dynamics must POST to BASE_URL_PUBLIC."""
+        client = _make_client(tmp_path)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"code": 200, "data": {"trades": []}}
+        client._session.post.return_value = mock_resp
+
+        client.fetch_user_inventory_dynamics(task_id=99, target_good_id=12345)
+
+        called_url = client._session.post.call_args[0][0]
+        assert "api.test.com" in called_url
+        assert "vip.test.com" not in called_url

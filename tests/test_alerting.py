@@ -78,13 +78,13 @@ class TestFormatter:
         result = _make_result(signal_type="ACCUMULATION", obi=0.7, sdr=0.2)
         payload = format_anomaly_alert("AWP | Asiimov (Field-Tested)", result)
         text = payload["markdown"]["text"]
-        assert "red" in text
+        assert "#FF5722" in text
 
     def test_dump_risk_text_contains_orange_color(self):
         result = _make_result(signal_type="DUMP_RISK", obi=-0.8, lease_roi=0.0005)
         payload = format_anomaly_alert("AWP | Asiimov (Field-Tested)", result)
         text = payload["markdown"]["text"]
-        assert "orange" in text
+        assert "#FF9800" in text
 
     def test_item_name_appears_in_text(self):
         item_name = "M4A4 | Howl (Factory New)"
@@ -103,9 +103,9 @@ class TestFormatter:
         )
         payload = format_anomaly_alert("Test Item", result)
         text = payload["markdown"]["text"]
-        # Spot-check that formatted values appear
-        assert "0.1234" in text
-        assert "0.0567" in text
+        # formatter multiplies by 100 → check percentage-formatted values
+        assert "12.34" in text
+        assert "5.67" in text
 
     def test_timestamp_appears_in_text(self):
         ts = "2026-01-15T08:30:00+00:00"
@@ -252,7 +252,7 @@ class TestAlertDispatcher:
         assert result is True
         mock_alerter.send.assert_called_once()
 
-    def test_dispatch_irregular_calls_alerter_and_returns_true(self):
+    def test_dispatch_irregular_is_silenced_returns_false(self):
         mock_alerter = MagicMock(spec=DingTalkAlerter)
         mock_alerter.send.return_value = True
         dispatcher = AlertDispatcher(mock_alerter)
@@ -260,8 +260,8 @@ class TestAlertDispatcher:
             "Some Item",
             _make_result(signal_type="IRREGULAR"),
         )
-        assert result is True
-        mock_alerter.send.assert_called_once()
+        assert result is False
+        mock_alerter.send.assert_not_called()
 
     def test_alerter_send_failure_returns_false(self):
         mock_alerter = MagicMock(spec=DingTalkAlerter)

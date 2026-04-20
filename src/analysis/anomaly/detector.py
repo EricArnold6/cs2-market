@@ -43,20 +43,17 @@ class MarketAnomalyDetector:
         port = db_config.get("port", 5432)
         dbname = db_config.get("dbname")
         self._engine_uri = f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{dbname}"
+        self._engine = create_engine(self._engine_uri)
 
     # ... (fetch_recent_data 和 engineer_features 保持不变) ...
     def fetch_recent_data(self, item_nameid: int, hours: int = 24) -> pd.DataFrame:
         cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=hours)
-        engine = create_engine(self._engine_uri)
-        try:
-            with engine.connect() as conn:
-                return pd.read_sql_query(
-                    text(_SQL),
-                    conn,
-                    params={"item_nameid": item_nameid, "cutoff": cutoff},
-                )
-        finally:
-            engine.dispose()
+        with self._engine.connect() as conn:
+            return pd.read_sql_query(
+                text(_SQL),
+                conn,
+                params={"item_nameid": item_nameid, "cutoff": cutoff},
+            )
 
     def engineer_features(self, df: pd.DataFrame) -> pd.DataFrame:
         return engineer_features(df)

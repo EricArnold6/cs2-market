@@ -1,214 +1,196 @@
 # cs2-market
 
-A quantitative trading toolkit for the **CS2 (Counter-Strike 2) cosmetics market**.
+量化交易工具包，用于 **CS2（反恐精英 2）饰品市场**的盘主（庄家）行为检测与交易信号生成。
 
-The library detects **market maker (盘主) activity** — large traders who drive short-term price swings by accumulating or distributing specific items — and generates **actionable trading signals** you can act on or back-test.
-
----
-
-## Table of Contents
-
-- [Features](#features)
-- [Project Structure](#project-structure)
-- [Architecture Overview](#architecture-overview)
-- [Quick Start](#quick-start)
-- [Installation](#installation)
-- [Module Reference](#module-reference)
-  - [1. Data Models (`src/schemas/`, `src/acquisition/models.py`)](#1-data-models)
-  - [2. Data Acquisition (`src/acquisition/`)](#2-data-acquisition)
-  - [3. Technical Indicators (`src/analysis/indicators.py`)](#3-technical-indicators)
-  - [4. Market Maker Detection (`src/analysis/market_maker.py`)](#4-market-maker-detection)
-  - [5. Trading Signals (`src/strategy/signal.py`)](#5-trading-signals)
-  - [6. Backtesting (`src/backtest/`)](#6-backtesting)
-  - [7. Anomaly Detection (`src/analysis/anomaly/`)](#7-anomaly-detection)
-  - [8. Storage (`src/storage/`)](#8-storage)
-  - [9. Alerting (`src/alerting/`)](#9-alerting)
-- [Import Paths & Compatibility](#import-paths--compatibility)
-- [Running Tests](#running-tests)
-- [Notes and Risks](#notes-and-risks)
+系统接入 **CSQAQ** 数据平台，以 3 分钟为周期轮询 BUFF 订单簿，通过孤立森林异常检测 + K线量价确认 + 巨鲸筹码追踪三级验证，向钉钉群机器人推送高置信度告警。
 
 ---
 
-## Features
+## 目录
 
-| Module | Description |
-|--------|-------------|
-| `src/schemas/market.py` | `OrderBookSnapshot` — system-wide canonical data contract |
-| `src/acquisition/` | Steam order-book fetcher, nameid cache, batch initializer |
-| `src/analysis/indicators.py` | SMA, EMA, RSI, MACD, Bollinger Bands, volume ratio |
-| `src/analysis/market_maker.py` | Volume spike, price momentum, BB breakout, composite MM score |
+- [功能概览](#功能概览)
+- [项目结构](#项目结构)
+- [系统架构](#系统架构)
+- [快速开始](#快速开始)
+- [安装](#安装)
+- [配置](#配置)
+- [模块参考](#模块参考)
+  - [1. 数据模型](#1-数据模型)
+  - [2. 数据获取](#2-数据获取)
+  - [3. 技术指标](#3-技术指标)
+  - [4. 盘主评分](#4-盘主评分)
+  - [5. 交易信号](#5-交易信号)
+  - [6. 回测引擎](#6-回测引擎)
+  - [7. 异常检测](#7-异常检测)
+  - [8. 数据存储](#8-数据存储)
+  - [9. 告警推送](#9-告警推送)
+- [运行测试](#运行测试)
+- [注意事项](#注意事项)
+
+---
+
+## 功能概览
+
+| 模块 | 描述 |
+|------|------|
+| `src/acquisition/csqaq_client.py` | CSQAQ REST API 客户端（批量价格、K线、巨鲸排行） |
+| `src/acquisition/cache.py` | 持久化 JSON 缓存（中文名 ↔ 英文名 ↔ CSQAQ ID） |
+| `src/acquisition/initializer.py` | 三级解析：缓存 → 本地 TXT → HTTP |
+| `src/schemas/market.py` | `OrderBookSnapshot` — 全系统共享数据契约 |
+| `src/analysis/indicators.py` | SMA / EMA / RSI / MACD / 布林带 / 量比 |
+| `src/analysis/market_maker.py` | 量价突破、动量、布林突破、综合盘主评分 |
+| `src/analysis/anomaly/` | `MarketAnomalyDetector` — 孤立森林 + Z-Score + K线确认 + 巨鲸追踪 |
+| `src/analysis/prediction/whale_tracker.py` | `WhaleTracker` — 大户筹码动态追踪 |
 | `src/strategy/signal.py` | `generate_signals()` / `latest_signal()` → BUY / SELL / HOLD |
-| `src/backtest/` | `run_backtest()` — P&L, win rate, max drawdown |
-| `src/analysis/anomaly/` | `MarketAnomalyDetector` — Isolation Forest over order-book microstructure |
-| `src/storage/` | PostgreSQL persistence (`DatabaseConnection`, `OrderBookRepository`) |
-| `src/alerting/` | DingTalk Webhook alerts with HMAC-SHA256 signing |
+| `src/backtest/` | `run_backtest()` — P&L、胜率、最大回撤 |
+| `src/storage/` | PostgreSQL 持久化（`DatabaseConnection`、`OrderBookRepository`） |
+| `src/alerting/` | 钉钉 Webhook 告警（HMAC-SHA256 签名、熔断机制） |
 
 ---
 
-## Project Structure
+## 项目结构
 
 ```
 cs2-market/
 ├── README.md
-├── CLAUDE.md                          # AI assistant instructions
-├── example.py                         # Offline demo (synthetic data, no HTTP)
+├── CLAUDE.md                          # AI 助手指令
+├── main.py                            # 生产入口 — QuantOrchestrator
+├── example.py                         # 离线演示（合成数据，无 HTTP）
 ├── requirements.txt
-├── .gitignore
+├── config/
+│   └── settings.json                  # 数据库 / 钉钉 / CSQAQ 配置（勿提交）
+├── data/
+│   ├── nameid_cache.json              # 持久化 ID 缓存（自动维护）
+│   └── 饰品id（更新时间2026-01-23）.txt  # 本地 ID 离线文件（可选）
 │
 ├── src/
-│   ├── __init__.py
-│   │
-│   ├── schemas/                       ══ 全系统共享数据契约 ══
-│   │   ├── __init__.py
-│   │   └── market.py                  OrderBookSnapshot (single source of truth)
-│   │
-│   ├── acquisition/                   ══ 模块一：数据获取与清洗 ══
-│   │   ├── __init__.py                re-export 所有公开符号
-│   │   ├── exceptions.py              NameIdExtractionError, NameIdNotInitializedError
-│   │   ├── models.py                  PriceRecord, ItemHistory, TradeSignal, OrderBook
-│   │   ├── cache.py                   _NameIdCache（持久化 JSON 缓存）
-│   │   ├── http_client.py             SteamHttpClient, SteamOrderBookFetcher
-│   │   ├── initializer.py             NameIdInitializer, InitResult
-│   │   └── fetcher.py                 MarketDataFetcher（CNY）+ 向后兼容 re-export hub
-│   │
-│   ├── storage/                       ══ 模块二：数据存储 ══
-│   │   ├── __init__.py
-│   │   ├── database.py                DatabaseConnection（psycopg2, autocommit, DDL init）
-│   │   └── repository.py              OrderBookRepository（CRUD, bulk insert）
-│   │
-│   ├── analysis/                      ══ 模块三：特征工程与模型策略 ══
-│   │   ├── __init__.py
-│   │   ├── indicators.py              SMA / EMA / RSI / MACD / BB / volume ratio
-│   │   ├── market_maker.py            volume spike / momentum / BB breakout / composite score
-│   │   └── anomaly/
-│   │       ├── __init__.py            exports MarketAnomalyDetector
-│   │       ├── features.py            engineer_features(df) → 4-column DataFrame
-│   │       └── detector.py            MarketAnomalyDetector（Isolation Forest pipeline）
-│   │
-│   ├── strategy/                      ══ 模块五：信号生成 ══
-│   │   ├── __init__.py
-│   │   └── signal.py                  generate_signals(), latest_signal()
-│   │
-│   ├── backtest/                      ══ 模块六：回测引擎 ══
-│   │   ├── __init__.py
-│   │   ├── models.py                  Trade, BacktestResult
-│   │   └── engine.py                  run_backtest()
-│   │
-│   ├── alerting/                      ══ 模块四：预警与推送 ══
-│   │   ├── __init__.py
-│   │   ├── bot.py                     DingTalkAlerter（HMAC-SHA256 Webhook）
-│   │   ├── formatter.py               format_anomaly_alert() → DingTalk Markdown payload
-│   │   └── dispatcher.py              AlertDispatcher（过滤 NORMAL，路由异常信号）
+│   ├── schemas/
+│   │   └── market.py                  # OrderBookSnapshot（单一数据契约）
+│   ├── acquisition/
+│   │   ├── csqaq_client.py            # CSQAQClient — REST API 客户端
+│   │   ├── cache.py                   # _NameIdCache — 持久化 JSON 缓存
+│   │   ├── initializer.py             # NameIdInitializer — 三级解析
+│   │   ├── models.py                  # PriceRecord, ItemHistory, TradeSignal
+│   │   └── exceptions.py             # NameIdExtractionError, NameIdNotInitializedError
+│   ├── analysis/
+│   │   ├── indicators.py              # SMA / EMA / RSI / MACD / BB / 量比
+│   │   ├── market_maker.py            # 量价突破 / 动量 / BB突破 / 综合评分
+│   │   ├── anomaly/
+│   │   │   ├── features.py            # engineer_features() → 7特征 + Z-Score
+│   │   │   └── detector.py            # MarketAnomalyDetector
+│   │   └── prediction/
+│   │       └── whale_tracker.py       # WhaleTracker — 大户筹码追踪
+│   ├── strategy/
+│   │   └── signal.py                  # generate_signals(), latest_signal()
+│   ├── backtest/
+│   │   ├── engine.py                  # run_backtest()
+│   │   └── models.py                  # Trade, BacktestResult
+│   ├── storage/
+│   │   ├── database.py                # DatabaseConnection（psycopg2, autocommit）
+│   │   └── repository.py              # OrderBookRepository（CRUD, 批量写入）
+│   └── alerting/
+│       ├── bot.py                     # DingTalkAlerter（HMAC-SHA256 Webhook）
+│       ├── formatter.py               # format_anomaly_alert() → 钉钉 Markdown
+│       └── dispatcher.py              # AlertDispatcher（过滤 + 熔断）
 │
 └── tests/
-    ├── test_indicators.py
-    ├── test_market_maker.py
-    ├── test_fetcher.py
-    ├── test_storage.py
-    ├── test_backtest.py
-    ├── test_anomaly.py
-    └── test_alerting.py
+    ├── test_acquisition.py            # _NameIdCache, CSQAQClient
+    ├── test_indicators.py             # SMA / EMA / RSI / MACD / BB / 量比
+    ├── test_market_maker.py           # 盘主评分各子检测器
+    ├── test_backtest.py               # run_backtest()
+    ├── test_anomaly.py                # 特征工程 + MarketAnomalyDetector
+    ├── test_alerting.py               # DingTalkAlerter, formatter, dispatcher
+    └── test_storage.py                # DatabaseConnection, OrderBookRepository
 ```
 
 ---
 
-## Architecture Overview
+## 系统架构
 
 ```
-┌──────────────────────────────────────────────────────────────────────────┐
-│                         cs2-market data flow                             │
-│                                                                          │
-│  Steam Community Market                                                  │
-│        │                                                                 │
-│        ▼                                                                 │
-│  SteamOrderBookFetcher ──────────────────────────────────────────────┐  │
-│  (UA pool, retry, rate-limit)                                        │  │
-│        │                                                             │  │
-│        ▼                                                             ▼  │
-│  QuantOrchestrator                                         OrderBookRepository
-│  run_forever() → _scan_all_items()                         (PostgreSQL)     │
-│        │                                                             │  │
-│        ▼                                                             │  │
-│  _process_item()                                                     │  │
-│        │                                                             │  │
-│        ├──► MarketAnomalyDetector ◄────────── fetch_recent_data() ──┘  │
-│        │    (Isolation Forest)                                          │
-│        │         │                                                      │
-│        │         ▼                                                      │
-│        │    AlertDispatcher                                             │
-│        │    (suppress NORMAL)                                          │
-│        │         │                                                      │
-│        │         ▼                                                      │
-│        │    DingTalkAlerter                                             │
-│        │    (HMAC Webhook)                                              │
-│        │                                                               │
-│        └──► ItemHistory                                                 │
-│                  │                                                      │
-│                  ├──► indicators (SMA/EMA/RSI/MACD/BB)                  │
-│                  ├──► market_maker_score()                              │
-│                  ├──► generate_signals() → TradeSignal[]               │
-│                  └──► run_backtest()     → BacktestResult              │
-└──────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                         cs2-market 数据流（V4.0）                             │
+│                                                                              │
+│  CSQAQ REST API                                                              │
+│        │                                                                     │
+│        ▼                                                                     │
+│  CSQAQClient.fetch_batch_prices()          CSQAQClient.fetch_kline_data()   │
+│  （批量获取 BUFF 订单簿快照）               （K线量价，二次确认）              │
+│        │                                           │                         │
+│        ▼                                           │                         │
+│  QuantOrchestrator._scan_all_items_batch()         │                         │
+│        │                                           │                         │
+│        ├──► OrderBookRepository.insert_snapshot()  │                         │
+│        │    （PostgreSQL 持久化）                   │                         │
+│        │                                           │                         │
+│        └──► MarketAnomalyDetector.detect_anomalies()                        │
+│                  │                                                           │
+│                  ├─ 1. IsolationForest（孤立森林基础检测）                    │
+│                  ├─ 2. _verify_volume_breakout()  ◄── K线放量确认             │
+│                  └─ 3. WhaleTracker.calculate_accumulation_index()           │
+│                            （大户筹码净流入确认）                              │
+│                                 │                                            │
+│                                 ▼                                            │
+│                       信号类型输出                                            │
+│                       WHALE_CONFIRMED_BUY / ACCUMULATION /                   │
+│                       DUMP_RISK / ARBITRAGE_OPPORTUNITY /                    │
+│                       IRREGULAR / NORMAL                                     │
+│                                 │                                            │
+│                                 ▼                                            │
+│                       AlertDispatcher.dispatch()                             │
+│                       （过滤 NORMAL + IRREGULAR，熔断拦截逆势做多）            │
+│                                 │                                            │
+│                                 ▼                                            │
+│                       DingTalkAlerter.send()                                 │
+│                       （HMAC-SHA256 签名 Webhook）                            │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Quick Start
+## 快速开始
 
 ```bash
 git clone <repo-url>
 cd cs2-market
+
+# 安装依赖
 pip install -r requirements.txt
 
-# Run the offline demo (synthetic data, no HTTP requests)
+# 编辑配置（填入真实的数据库和 API 凭据）
+# 见下方「配置」章节
+
+# 启动生产监控守护进程
+python main.py
+```
+
+**离线演示**（合成数据，无任何 HTTP 请求）：
+
+```bash
 python example.py
-```
-
-Sample output:
-
-```
-============================================================
-  CS2 Quantitative Market Analyser
-  Item: AK-47 | Redline (Field-Tested)
-============================================================
-
-[ Market Maker Detection (last 10 days) ]
-  Day 115 | Price= 64.49 | Vol=  30 | MM Score=0.45 | Dir=LONG  ◄ ALERT
-  ...
-
-[ Trading Signals (last 10 days) ]
-  BUY  | Price= 55.96 | Confidence=0.55 | Market maker LONG signal (score=0.55); ...
-  ...
-
-[ Backtest Results ]
-  Initial capital : 500.00
-  Final capital   : 494.87
-  Total return    : -1.03%
-  Trades executed : 1
-  Win rate        : 0.00%
-  Max drawdown    : 2.07%
 ```
 
 ---
 
-## Installation
+## 安装
 
-**Requirements**: Python 3.10+
+**要求**：Python 3.10+
 
 ```bash
 pip install -r requirements.txt
 ```
 
-| Package | Version | Purpose |
-|---------|---------|---------|
-| `requests` | ≥ 2.31 | HTTP client for Steam API |
-| `numpy` | ≥ 1.24 | Numerical computation |
-| `pandas` | ≥ 2.0 | DataFrame for anomaly features |
+| 包 | 版本要求 | 用途 |
+|----|---------|------|
+| `requests` | ≥ 2.31 | HTTP 客户端（CSQAQ API） |
+| `numpy` | ≥ 1.24 | 数值计算 |
+| `pandas` | ≥ 2.0 | 特征工程 DataFrame |
 | `scikit-learn` | ≥ 1.3 | Isolation Forest |
-| `psycopg2-binary` | ≥ 2.9 | PostgreSQL adapter |
-| `pytest` | ≥ 7.4 | Test framework |
+| `sqlalchemy` | ≥ 2.0 | 异常检测模块的 DB 查询层 |
+| `psycopg2-binary` | ≥ 2.9 | PostgreSQL 适配器 |
+| `pytest` | ≥ 7.4 | 测试框架 |
 
-**Virtual environment (Windows)**:
+**Windows 虚拟环境**：
 
 ```bash
 python -m venv .venv
@@ -218,630 +200,443 @@ pip install -r requirements.txt
 
 ---
 
-## Module Reference
+## 配置
 
-### 1. Data Models
+所有配置集中在 `config/settings.json`：
+
+```json
+{
+    "database": {
+        "dbname": "postgres",
+        "user": "postgres",
+        "password": "YOUR_PASSWORD",
+        "host": "localhost",
+        "port": 5432
+    },
+    "dingtalk": {
+        "webhook_url": "https://oapi.dingtalk.com/robot/send?access_token=YOUR_TOKEN",
+        "secret": "SECxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    },
+    "system": {
+        "scan_interval_minutes": 3
+    },
+    "csqaq": {
+        "api_token": "YOUR_CSQAQ_API_TOKEN",
+        "vip_token": "YOUR_CSQAQ_VIP_TOKEN",
+        "base_url_public": "https://api.csqaq.com/api/v1",
+        "base_url_vip": "https://private-api.csqaq.com/api/v1"
+    },
+    "target_items": [
+        "AK-47 | 表面淬火 (崭新出厂)",
+        "M4A4 | 地狱烈焰 (久经沙场)"
+    ]
+}
+```
+
+> ⚠️ **安全提示**：`settings.json` 包含真实凭据，已加入 `.gitignore`，请勿提交到版本库。
+
+---
+
+## 模块参考
+
+### 1. 数据模型
 
 #### `src/schemas/market.py` — `OrderBookSnapshot`
 
-The **system-wide canonical data contract**, shared across acquisition, storage, and analysis layers.
-Field names match the `order_book_snapshots` database columns exactly to eliminate naming drift.
+全系统共享的数据契约，字段名与 PostgreSQL 表列名完全一致。
 
 ```python
 from src.schemas.market import OrderBookSnapshot
 
 snap = OrderBookSnapshot(
     item_name="AK-47 | Redline (Field-Tested)",
-    timestamp=1700000000,
-    lowest_ask_price=65.50,
-    highest_bid_price=64.00,
-    ask_volume_top5=120,
-    bid_volume_top5=85,
+    timestamp=1700000000.0,
+    lowest_ask_price=65.50,   # BUFF 最低卖价；0.0 = 无挂单
+    highest_bid_price=64.00,  # BUFF 最高买价；0.0 = 无求购
     total_sell_orders=430,
     total_buy_orders=210,
+    yyyp_sell_price=64.00,    # YYYP 平台卖价（用于跨平台套利检测）
+    yyyp_lease_price=0.30,    # YYYP 租金日价
 )
 
-print(snap.spread)          # 1.5    (ask − bid)
-print(snap.mid_price)       # 64.75  ((ask + bid) / 2)
-print(snap.spread_ratio)    # 0.0234 ((ask − bid) / bid)
+print(snap.spread)         # 1.50   (卖价 - 买价)
+print(snap.mid_price)      # 64.75  ((卖价 + 买价) / 2)
+print(snap.spread_ratio)   # 0.0234 ((卖价 - 买价) / 买价)
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `item_name` | `str` | Steam market hash name |
-| `timestamp` | `int` | UTC Unix timestamp (seconds) |
-| `lowest_ask_price` | `float` | Cheapest sell listing; `0.0` = no orders |
-| `highest_bid_price` | `float` | Highest buy request; `0.0` = no orders |
-| `ask_volume_top5` | `int` | Cumulative sell volume across top-5 price levels |
-| `bid_volume_top5` | `int` | Cumulative buy volume across top-5 price levels |
-| `total_sell_orders` | `int` | Total sell orders in the order book |
-| `total_buy_orders` | `int` | Total buy orders in the order book |
-
-#### `src/acquisition/models.py` — Price history models
+#### `src/acquisition/models.py` — 历史价格模型
 
 ```python
 from src.acquisition.models import PriceRecord, ItemHistory, TradeSignal
 
-record = PriceRecord(timestamp=1700000000, price=64.5, volume=12)
-history = ItemHistory(item_name="AK-47 | Redline (Field-Tested)", records=[record, ...])
+record = PriceRecord(timestamp=1700000000.0, price=64.5, volume=12)
+history = ItemHistory(item_name="AK-47 | Redline (Field-Tested)", records=[record])
 
-print(history.prices)      # [64.5, ...]
-print(history.volumes)     # [12, ...]
-print(history.timestamps)  # [1700000000, ...]
+print(history.prices)      # [64.5]
+print(history.volumes)     # [12]
+print(history.timestamps)  # [1700000000.0]
 ```
 
 ---
 
-### 2. Data Acquisition
+### 2. 数据获取
 
-The acquisition pipeline is **two-phase**: first resolve item nameids (once), then poll the order-book API indefinitely.
-
-#### Two-phase workflow
-
-```
-┌──────────────────────────────────────────────────────────┐
-│  Phase 1: Initialization (run once)                      │
-│                                                          │
-│  NameIdInitializer.run(item_names)                       │
-│    ├─ Cache hit  → skip, no HTTP                         │
-│    └─ Cache miss → HTML request (5–10 s delay each)      │
-│         └─ writes to _NameIdCache (disk-persistent JSON) │
-└──────────────────────────────────────────────────────────┘
-               ↓  initialization complete
-┌──────────────────────────────────────────────────────────┐
-│  Phase 2: Polling (runs forever)                         │
-│                                                          │
-│  QuantOrchestrator.run_forever(stop_event)               │
-│    └─ every 750 s → _scan_all_items()                    │
-│         └─ _process_item(item_name)                      │
-│              ├─ SteamOrderBookFetcher.fetch_order_book() │
-│              ├─ OrderBookRepository.insert_snapshot()    │
-│              ├─ MarketAnomalyDetector.detect_anomalies() │
-│              └─ AlertDispatcher.dispatch()               │
-└──────────────────────────────────────────────────────────┘
-```
-
-#### Complete usage example
+#### `CSQAQClient` — API 客户端
 
 ```python
-import threading
-from src.acquisition import SteamOrderBookFetcher, NameIdInitializer
+from src.acquisition.csqaq_client import CSQAQClient
 
-ITEMS = [
-    "AK-47 | Redline (Field-Tested)",
-    "AWP | Asiimov (Field-Tested)",
-]
+client = CSQAQClient(
+    api_token="YOUR_API_TOKEN",
+    vip_token="YOUR_VIP_TOKEN",
+)
 
-# Phase 1: Resolve nameids (cached to disk)
-fetcher = SteamOrderBookFetcher()
-init = NameIdInitializer(fetcher)
-result = init.run(ITEMS)
+# 批量获取订单簿快照（≤ 50 个/次，自动分块）
+snapshots = client.fetch_batch_prices(["AK-47 | Redline (Field-Tested)", ...])
 
-if not result.all_succeeded:
-    raise RuntimeError(f"Init failed for: {list(result.failed)}")
+# K线数据（用于量价确认）
+klines = client.fetch_kline_data(csqaq_id=176923345, periods="1hour")
 
-print(f"Init: {len(result.from_cache)} cache hits, {len(result.resolved)} resolved")
-
-# Phase 2: Run the full pipeline via QuantOrchestrator (main.py)
-# QuantOrchestrator.run_forever() drives _scan_all_items() → _process_item()
-# combining order-book fetching, anomaly detection, PostgreSQL storage, and alerting.
+# 大户排行（用于巨鲸追踪）
+whales = client.fetch_whale_ranking(csqaq_id=176923345, limit=10)
 ```
 
-#### Offline pre-injection: `_NameIdCache.load_from_dict()`
+| 方法 | 接口 | 说明 |
+|------|------|------|
+| `resolve_item_nameid(name)` | `GET /search/suggest` | 解析饰品 CSQAQ ID（有本地缓存） |
+| `fetch_batch_prices(names)` | `POST /goods/getPriceByMarketHashName` | 批量获取 BUFF/YYYP 价格快照 |
+| `fetch_kline_data(id)` | `POST /info/simple/chartAll` | K线数据（VIP 接口） |
+| `fetch_whale_ranking(id)` | `POST /monitor/rank` | 大户持仓排行 |
+| `fetch_user_inventory_dynamics(task_id, good_id)` | `POST /task/get_task_business` | 大户库存动态 |
 
-If you already know item nameids (e.g. from a database), skip all HTML requests entirely:
+#### `NameIdInitializer` — 三级 ID 解析
 
 ```python
-from src.acquisition import SteamOrderBookFetcher
+from pathlib import Path
+from src.acquisition.initializer import NameIdInitializer
+
+initializer = NameIdInitializer(client)
+result = initializer.run(
+    item_names=["M4A4 | 地狱烈焰 (久经沙场)", ...],
+    txt_path=Path("data/饰品id（更新时间2026-01-23）.txt"),  # 可选本地离线文件
+)
+
+print(result.from_cache)   # 缓存命中的品种
+print(result.resolved)     # 本次新解析的品种
+print(result.failed)       # 解析失败 {name: exception}
+print(result.all_succeeded)  # bool
+```
+
+解析优先级：**本地缓存** → **本地 TXT 文件** → **HTTP API**
+
+#### `_NameIdCache.load_from_dict()` — 批量预注入
+
+已知 ID 时可跳过所有网络请求：
+
+```python
 from src.acquisition.cache import _NameIdCache
 from pathlib import Path
 
-cache = _NameIdCache(Path("my_cache.json"))
-cache.load_from_dict({
+cache = _NameIdCache(Path("data/nameid_cache.json"))
+written = cache.load_from_dict({
     "AK-47 | Redline (Field-Tested)": 176923345,
     "AWP | Asiimov (Field-Tested)":   696692904,
 })
-# overwrite=True to force-update existing entries
-
-fetcher = SteamOrderBookFetcher(cache=cache)
-ob = fetcher.fetch_order_book("AK-47 | Redline (Field-Tested)")
-print(ob.mid_price)
-```
-
-- `overwrite=False` (default): existing entries are not overwritten
-- `overwrite=True`: force-update even already-cached nameids
-- Returns the number of entries actually written to disk
-- Entire batch is written atomically (`.tmp` + `os.replace`)
-
-#### `NameIdInitializer` — `InitResult`
-
-```python
-@dataclass
-class InitResult:
-    resolved:   list[str]        # newly fetched via HTTP
-    from_cache: list[str]        # found in local JSON cache
-    failed:     dict[str, Exception]  # name → error
-
-    @property
-    def all_succeeded(self) -> bool: ...
-```
-
-#### Anti-ban design
-
-| Request type | Delay strategy | Notes |
-|---|---|---|
-| HTML listing page (init) | 5–10 s random jitter | Steam rate-limits HTML more strictly than JSON |
-| JSON API (polling) | 2–5 s random jitter | Applied between each item in `fetch_multiple()` |
-| HTTP 429 retry | Exponential back-off (60 s × attempt) | Max 3 retries; raises `RuntimeError` after exhaustion |
-| User-Agent pool | 7 real UA strings, random per request | Chrome/Firefox/Safari/Edge on Windows/macOS/Linux |
-| Default poll interval | 750 s (12.5 minutes) | Midpoint of Steam's ~10–15 min rate-limit window |
-
-#### `SteamHttpClient` — transport layer
-
-The `SteamHttpClient` class handles all network transport concerns (UA rotation, proxy dispatch, 429 back-off) with **no knowledge of Steam API semantics**. `SteamOrderBookFetcher` depends on it via constructor injection, making unit testing straightforward with a mock session.
-
-```python
-from src.acquisition.http_client import SteamHttpClient, SteamOrderBookFetcher
-
-# Optional: inject a proxy list
-http_client = SteamHttpClient(proxies=["http://proxy1:8080", "http://proxy2:8080"])
-fetcher = SteamOrderBookFetcher(http_client=http_client)
+# overwrite=True 可强制覆盖已有条目
+print(f"写入 {written} 条")
 ```
 
 ---
 
-### 3. Technical Indicators
+### 3. 技术指标
 
-All functions in `src/analysis/indicators.py` accept plain Python `list[float]` and return a list of the same length. Positions within the warm-up period are filled with `None`.
+`src/analysis/indicators.py` 所有函数接受 `list[float]`，返回等长列表，热身期填 `None`。
 
 ```python
 from src.analysis.indicators import sma, ema, rsi, macd, bollinger_bands, volume_ratio
 
 prices = [60.0, 61.5, 63.0, 62.5, 64.0, 65.5, 63.5, 66.0, 67.0, 65.5]
 
-# Simple / Exponential Moving Average
-sma_5  = sma(prices, period=5)   # [None, None, None, None, 62.2, ...]
-ema_5  = ema(prices, period=5)   # [None, None, None, None, 62.2, ...]
-
-# RSI (default period=14; requires >14 data points)
+sma_5  = sma(prices, period=5)
+ema_5  = ema(prices, period=5)
 rsi_14 = rsi(prices, period=14)
-
-# MACD → dict with keys: macd_line, signal_line, histogram
-m = macd(prices, fast=12, slow=26, signal_period=9)
-print(m["histogram"][-1])
-
-# Bollinger Bands → dict with keys: middle, upper, lower
-bb = bollinger_bands(prices, period=20, num_std=2.0)
-print(bb["upper"][-1], bb["lower"][-1])
-
-# Volume ratio (current vol / rolling average vol)
-volumes = [10, 12, 8, 15, 30, 11, 9, 14, 11, 10]
-vr = volume_ratio(volumes, period=10)   # > 2.0 = volume spike
+m      = macd(prices)           # {"macd_line": [...], "signal_line": [...], "histogram": [...]}
+bb     = bollinger_bands(prices, period=20, num_std=2.0)  # {"middle", "upper", "lower"}
+vr     = volume_ratio([10, 12, 30, ...], period=10)       # > 2.0 = 放量
 ```
 
-| Function | Warm-up rows | Return type |
-|----------|-------------|-------------|
-| `sma(prices, period)` | `period - 1` | `list[float \| None]` |
-| `ema(prices, period)` | `period - 1` | `list[float \| None]` |
-| `rsi(prices, period=14)` | `period` | `list[float \| None]` |
-| `macd(prices, fast=12, slow=26, signal_period=9)` | `slow + signal_period - 2` | `dict` |
-| `bollinger_bands(prices, period=20, num_std=2.0)` | `period - 1` | `dict` |
-| `volume_sma(volumes, period=10)` | `period - 1` | `list[float \| None]` |
-| `volume_ratio(volumes, period=10)` | `period - 1` | `list[float \| None]` |
+| 函数 | 热身行数 |
+|------|---------|
+| `sma(prices, period)` | `period - 1` |
+| `ema(prices, period)` | `period - 1` |
+| `rsi(prices, period=14)` | `period` |
+| `macd(prices, fast=12, slow=26, signal_period=9)` | `slow + signal_period - 2` |
+| `bollinger_bands(prices, period=20, num_std=2.0)` | `period - 1` |
+| `volume_ratio(volumes, period=10)` | `period - 1` |
 
 ---
 
-### 4. Market Maker Detection
+### 4. 盘主评分
 
-`market_maker_score()` combines four heuristics into a single **(score, direction)** pair per data point. A score above **0.4** is considered significant.
+`market_maker_score()` 将四个信号合并为每个数据点的 **(score, direction)** 对，score ≥ 0.4 为显著。
 
 ```python
-from src.acquisition.models import ItemHistory, PriceRecord
 from src.analysis.market_maker import market_maker_score
 
-history = ItemHistory("AK-47 | Redline (FT)", records=[...])
 scores = market_maker_score(history)
-
 for score, direction in scores[-5:]:
-    flag = " ◄ ALERT" if score >= 0.4 else ""
+    flag = " ◄ 预警" if score >= 0.4 else ""
     print(f"Score={score:.2f}  Dir={direction}{flag}")
 ```
 
-**Scoring weights:**
-
-| Signal | Weight | Trigger condition |
-|--------|--------|-------------------|
-| Volume spike | **35%** | Current volume ≥ 2× rolling 10-day average |
-| Price momentum | **35%** | ≥ 5% price move over 3 days (UP or DOWN) |
-| Bollinger breakout | **20%** | Price outside 2σ bands |
-| RSI extreme | **10%** | RSI ≥ 70 (overbought → LONG) or ≤ 30 (oversold → SHORT) |
-
-**Direction logic:**
-
-- `"LONG"` — more LONG votes than SHORT votes (accumulation)
-- `"SHORT"` — more SHORT votes than LONG votes (distribution)
-- `"NEUTRAL"` — tied or no directional votes
-
-Individual detectors are also available:
-
-```python
-from src.analysis.market_maker import (
-    detect_volume_spikes,    # list[bool]
-    detect_price_momentum,   # list["UP" | "DOWN" | None]
-    detect_bollinger_breakout,  # list["UP" | "DOWN" | None]
-)
-```
+| 信号 | 权重 | 触发条件 |
+|------|------|---------|
+| 量能突破 | **35%** | 当期成交量 ≥ 10日均量 × 2 |
+| 价格动量 | **35%** | 3日内涨跌幅 ≥ 5% |
+| 布林突破 | **20%** | 价格突破 2σ 带 |
+| RSI 极值 | **10%** | RSI ≥ 70（LONG）或 ≤ 30（SHORT） |
 
 ---
 
-### 5. Trading Signals
-
-`generate_signals()` combines the market-maker score with MACD and Bollinger Band confirmation to produce a `TradeSignal` for each data point.
-
-**BUY conditions** (all must be true):
-1. MM score ≥ `mm_threshold` (default 0.4) AND direction is `LONG`
-2. RSI < `rsi_overbought` (default 70) — not yet overbought
-3. MACD histogram > 0 — upward momentum confirmed
-4. Price > BB middle band — price is extended above the mean
-
-**SELL conditions** (all must be true):
-1. MM score ≥ `mm_threshold` AND direction is `SHORT`
-2. RSI > `rsi_oversold` (default 30) — not yet oversold
-3. MACD histogram < 0 — downward momentum confirmed
-4. Price < BB middle band — price is below the mean
+### 5. 交易信号
 
 ```python
-from src.acquisition.models import ItemHistory
 from src.strategy.signal import generate_signals, latest_signal
 
-history = ItemHistory("AK-47 | Redline (FT)", records=[...])
-
-# All signals
 signals = generate_signals(history, mm_threshold=0.4)
 for sig in signals[-5:]:
-    print(f"{sig.action:4s} | Price={sig.price:.2f} | Confidence={sig.confidence:.2f} | {sig.reason}")
+    print(f"{sig.action:4s} | Price={sig.price:.2f} | Conf={sig.confidence:.2f} | {sig.reason}")
 
-# Latest signal only
 sig = latest_signal(history)
-print(sig.action, sig.confidence, sig.reason)
+print(sig.action, sig.price, sig.reason)
 ```
 
-**`TradeSignal` fields:**
+**BUY 条件**（全部满足）：盘主评分 ≥ 阈值 且方向 LONG / RSI < 70 / MACD 柱正 / 价格在布林中轨上方
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `item_name` | `str` | Market hash name |
-| `timestamp` | `float` | Unix timestamp of the record |
-| `action` | `str` | `"BUY"`, `"SELL"`, or `"HOLD"` |
-| `confidence` | `float` | Market-maker score (0.0–1.0) |
-| `reason` | `str` | Human-readable explanation |
-| `price` | `float \| None` | Price at signal time |
+**SELL 条件**（全部满足）：盘主评分 ≥ 阈值 且方向 SHORT / RSI > 30 / MACD 柱负 / 价格在布林中轨下方
 
 ---
 
-### 6. Backtesting
-
-`run_backtest()` simulates executing signals on historical data and reports portfolio performance metrics.
+### 6. 回测引擎
 
 ```python
-from src.acquisition.models import ItemHistory
 from src.backtest.engine import run_backtest
 
-history = ItemHistory("AK-47 | Redline (FT)", records=[...])
 result = run_backtest(history, initial_capital=1000.0, transaction_cost=0.15)
 
-print(f"Return    : {result.total_return:.1%}")
-print(f"Trades    : {result.num_trades}")
-print(f"Win rate  : {result.win_rate:.1%}")
-print(f"Max DD    : {result.max_drawdown:.1%}")
-
-for trade in result.trades:
-    print(f"  Buy={trade.buy_price:.2f} → Sell={trade.sell_price:.2f} | P&L={trade.profit_pct:.1%}")
+print(f"收益率    : {result.total_return:.1%}")
+print(f"交易次数  : {result.num_trades}")
+print(f"胜率      : {result.win_rate:.1%}")
+print(f"最大回撤  : {result.max_drawdown:.1%}")
 ```
 
-**Key assumptions:**
-
-- Only one unit held at a time (no fractional positions)
-- **15% transaction cost** by default (Steam's cut on sales)
-- Short-selling is not supported
-- An open position at backtest end is liquidated at the last available price
-
-> **Important**: Steam charges a 13–15% seller fee. An item must gain at least **~18% nominally** to break even after fees. This is why flat-price or low-volatility items generate zero profitable trades.
-
-**`BacktestResult` fields:**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `initial_capital` | `float` | Starting cash |
-| `final_capital` | `float` | Ending cash |
-| `total_return` | `float` | `(final − initial) / initial` |
-| `num_trades` | `int` | Completed buy+sell round trips |
-| `win_rate` | `float` | Fraction of profitable trades |
-| `max_drawdown` | `float` | Max peak-to-trough equity decline |
-| `trades` | `list[Trade]` | Individual trade records |
+> ⚠️ Steam 卖家手续费约 13–15%，一件饰品至少需涨 **~18%** 才能保本。这是为什么低波动品种回测无交易的原因。
 
 ---
 
-### 7. Anomaly Detection
+### 7. 异常检测
 
-`MarketAnomalyDetector` (in `src.analysis.anomaly`) fits an **Isolation Forest** over four order-book microstructure features to surface market-maker events without labeled data.
+`MarketAnomalyDetector` 对订单簿微结构特征运行孤立森林，结合 K线量价验证和巨鲸筹码追踪，输出三级验证后的信号。
 
-#### Four engineered features (`engineer_features(df)`)
+#### 特征工程（`engineer_features(df)`）
 
-| Feature | Formula | Warm-up rows | Meaning |
-|---------|---------|-------------|---------|
-| `obi` | `(bid_vol5 − ask_vol5) / (bid_vol5 + ask_vol5)` | 0 (NaN when both=0) | Order Book Imbalance — positive = buy-side pressure |
-| `spread_ratio` | `(ask_price − bid_price) / bid_price` | 0 (NaN when bid=0) | Relative bid-ask spread; widens during uncertainty |
-| `sdr` | `(supply_ma_6 − sell_orders) / supply_ma_6` | 5 | Supply Deviation Ratio — positive = sudden supply collapse |
-| `price_momentum_dev` | `(bid_price − bid_ma_12) / bid_ma_12` | 11 | Deviation of current bid from 12-period MA |
+共 **7 个基础特征 + 3 个 Z-Score**，最小行数要求 `_MIN_ROWS = 18`：
 
-**Minimum data requirement**: `_MIN_ROWS = 12` clean rows after NaN-dropping (driven by the 12-period MA warm-up).
+| 特征 | 公式 | 热身行 | 含义 |
+|------|------|--------|------|
+| `obi` | `(prev_sell - cur_sell) / prev_sell` | 1 | 短周期供应变化率 |
+| `spread_ratio` | `(ask - prev_ask) / prev_ask` | 1 | 价格变动率 |
+| `sdr` | `(MA6_sell - cur_sell) / MA6_sell` | 5 | 供应萎缩偏差 |
+| `price_momentum_dev` | `(ask - MA12_ask) / MA12_ask` | 11 | 价格偏离均线 |
+| `platform_spread` | `(buff_ask - yyyp_ask) / yyyp_ask` | 0 | 跨平台套利空间 |
+| `lease_roi` | `yyyp_lease / buff_ask` | 0 | 日租金/价格比 |
+| `price_volatility` | `std12(ask) / mean12(ask)` | 11 | 价格波动率 |
+| `obi_z` | Z-Score of `obi`（窗口 12） | 12 | 动态 OBI 偏差 |
+| `sdr_z` | Z-Score of `sdr`（窗口 12） | 12 | 动态 SDR 偏差 |
+| `spread_z` | Z-Score of `spread_ratio`（窗口 12） | 12 | 动态价差偏差 |
 
-#### Four signal types
+#### 六种信号类型
 
-| Signal | Condition | Meaning |
-|--------|-----------|---------|
-| `"NORMAL"` | Isolation Forest label == 1 | No anomaly detected |
-| `"ACCUMULATION"` | label == -1, `sdr > 0.10` AND `obi > 0.5` | 建仓扫货 — large buyer absorbing supply |
-| `"DUMP_RISK"` | label == -1, `obi < -0.6` AND `spread_ratio > 0.05` | 撤单/砸盘 — bid side collapsing |
-| `"IRREGULAR"` | label == -1, neither above | Unusual microstructure, unclassified |
+| 信号 | 触发条件 | 含义 |
+|------|---------|------|
+| `NORMAL` | 孤立森林 label == 1 | 无异常 |
+| `ACCUMULATION` | label==-1, `sdr_z > 2.0` AND `obi_z > 2.5` AND `obi > 0`，spread 稳定，低波动 | 建仓扫货 |
+| `DUMP_RISK` | label==-1, `obi_z < -2.5` AND `obi < 0` AND `spread_ratio < -0.01` | 撤单/砸盘 |
+| `ARBITRAGE_OPPORTUNITY` | `platform_spread > 0.05`（优先级最高） | 跨平台搬砖 |
+| `WHALE_CONFIRMED_BUY` | `ACCUMULATION` + K线放量确认 + 巨鲸净流入 ≥ +20 | 巨鲸绝杀建仓 |
+| `IRREGULAR` | label==-1，不满足上述任何条件；或 K线/巨鲸验证拦截的假信号 | 疑似洗盘 |
 
-#### Usage
+#### 三级验证流程
+
+```
+孤立森林检测 → ACCUMULATION/DUMP_RISK?
+    │
+    ├─ 否 → NORMAL / IRREGULAR / ARBITRAGE_OPPORTUNITY
+    │
+    └─ 是 → K线放量验证（_verify_volume_breakout）
+                │
+                ├─ 无量 → 降级为 IRREGULAR（无量空涨/假信号）
+                │
+                └─ 放量 → 巨鲸筹码追踪（WhaleTracker）
+                              │
+                              ├─ STRONG_PREDICTIVE_BUY → 升级为 WHALE_CONFIRMED_BUY
+                              ├─ PREDICTIVE_DUMP       → 降级为 IRREGULAR（借势出货）
+                              └─ NEUTRAL               → 保持 ACCUMULATION/DUMP_RISK
+```
+
+#### 用法
 
 ```python
-from src.analysis.anomaly import MarketAnomalyDetector
+from src.analysis.anomaly.detector import MarketAnomalyDetector
+from src.acquisition.csqaq_client import CSQAQClient
 
-db_config = {
-    "host": "localhost",
-    "dbname": "cs2market",
-    "user": "postgres",
-    "password": "secret",
-    "port": 5432,
-}
+client = CSQAQClient(api_token="...", vip_token="...")
+db_config = {"host": "localhost", "dbname": "cs2market", "user": "postgres", "password": "..."}
 
-detector = MarketAnomalyDetector(db_config)
+detector = MarketAnomalyDetector(db_config, client)
 result = detector.detect_anomalies(item_nameid=176923345)
 
 if result is None:
-    print("Not enough data (< 12 clean rows)")
+    print("数据不足（< 18 行干净数据）")
 else:
-    print(result["signal_type"])    # "ACCUMULATION", "DUMP_RISK", "IRREGULAR", or "NORMAL"
-    print(result["anomaly_score"])  # continuous score (more negative = more anomalous)
-    print(result["obi"])
-    print(result["sdr"])
-    print(result["spread_ratio"])
-    print(result["price_momentum_dev"])
-    print(result["timestamp"])      # ISO-8601 string
+    print(result["signal_type"])    # "WHALE_CONFIRMED_BUY", "ACCUMULATION" 等
+    print(result["anomaly_score"])  # 孤立森林分数（越负越异常）
+    print(result["obi"])            # 订单簿供需变化率
+    print(result["sdr"])            # 供应萎缩偏差
 ```
 
-#### Result dict schema
+#### `result` 字典字段
 
-| Key | Type | Description |
-|-----|------|-------------|
-| `timestamp` | `str` | ISO-8601 timestamp of the latest row |
-| `anomaly_score` | `float` | Isolation Forest score (lower = more anomalous) |
-| `obi` | `float` | Order Book Imbalance at latest row |
-| `spread_ratio` | `float` | Bid-ask spread ratio at latest row |
-| `sdr` | `float` | Supply Deviation Ratio at latest row |
-| `price_momentum_dev` | `float` | Price momentum deviation at latest row |
-| `signal_type` | `str` | `"NORMAL"` / `"ACCUMULATION"` / `"DUMP_RISK"` / `"IRREGULAR"` |
+| 键 | 类型 | 描述 |
+|----|------|------|
+| `timestamp` | `str` | ISO-8601 时间戳 |
+| `anomaly_score` | `float` | 孤立森林分数（越低越异常） |
+| `obi` | `float` | 订单簿供需变化率 |
+| `spread_ratio` | `float` | 价格变动率 |
+| `sdr` | `float` | 供应萎缩偏差 |
+| `price_momentum_dev` | `float` | 价格偏离均线 |
+| `platform_spread` | `float` | 跨平台价差 |
+| `price_volatility` | `float` | 价格波动率 |
+| `signal_type` | `str` | 信号类型 |
+| `whale_msg` | `str` | 仅 `WHALE_CONFIRMED_BUY` 时出现，巨鲸情报摘要 |
 
 ---
 
-### 8. Storage
+### 8. 数据存储
 
-The storage layer uses **PostgreSQL** with `psycopg2`. Schema is auto-initialized on first `connect()`.
+PostgreSQL，schema 在首次 `connect()` 时自动建表。
 
-#### Database schema
+#### 表结构
 
 ```sql
--- Item metadata
 CREATE TABLE items (
     item_nameid       BIGINT       PRIMARY KEY,
     market_hash_name  VARCHAR(255) NOT NULL UNIQUE,
     added_at          TIMESTAMPTZ  DEFAULT CURRENT_TIMESTAMP
 );
 
--- Order book time series
 CREATE TABLE order_book_snapshots (
     time               TIMESTAMPTZ NOT NULL,
     item_nameid        BIGINT      NOT NULL REFERENCES items(item_nameid),
-    lowest_ask_price   NUMERIC(10, 2),   -- NULL when no sell orders
-    highest_bid_price  NUMERIC(10, 2),   -- NULL when no buy orders
-    ask_volume_top5    INT,
-    bid_volume_top5    INT,
+    lowest_ask_price   NUMERIC(10, 2),   -- NULL 表示无挂单
+    highest_bid_price  NUMERIC(10, 2),   -- NULL 表示无求购
     total_sell_orders  INT,
-    total_buy_orders   INT
+    total_buy_orders   INT,
+    yyyp_sell_price    NUMERIC(10, 2),
+    yyyp_lease_price   NUMERIC(10, 4)
 );
 
 CREATE INDEX idx_item_time ON order_book_snapshots (item_nameid, time DESC);
 ```
 
-> Prices of `0.0` are stored as `NULL` (meaning no orders on that side).
-
-#### Usage
+#### 用法
 
 ```python
 from src.storage.database import DatabaseConnection
 from src.storage.repository import OrderBookRepository
 
-db_config = {"host": "localhost", "dbname": "cs2market", "user": "postgres", "password": "secret"}
+db_config = {"host": "localhost", "dbname": "cs2market", "user": "postgres", "password": "..."}
 
 with DatabaseConnection(db_config) as db:
     repo = OrderBookRepository(db.connection)
-
-    # Register item metadata (idempotent)
     repo.init_item_metadata(item_nameid=176923345, market_hash_name="AK-47 | Redline (Field-Tested)")
-
-    # Single insert
     repo.insert_snapshot(snapshot, item_nameid=176923345)
-
-    # Bulk insert (returns rows inserted)
-    nameid_map = {"AK-47 | Redline (Field-Tested)": 176923345}
-    n = repo.insert_snapshots_bulk(snapshots, nameid_map)
-    print(f"Inserted {n} rows")
-
-    # Query latest
-    row = repo.get_latest_snapshot(item_nameid=176923345)
-    print(row)  # dict or None
+    latest = repo.get_latest_snapshot(item_nameid=176923345)
 ```
-
-#### `OrderBookRepository` API
-
-| Method | Description |
-|--------|-------------|
-| `init_item_metadata(item_nameid, market_hash_name)` | `INSERT ... ON CONFLICT DO NOTHING` |
-| `insert_snapshot(snapshot, item_nameid)` | Insert a single `OrderBookSnapshot` |
-| `insert_snapshots_bulk(snapshots, nameid_map)` | Batch insert; returns row count |
-| `get_latest_snapshot(item_nameid)` | Returns `dict` or `None` |
 
 ---
 
-### 9. Alerting
+### 9. 告警推送
 
-The alerting stack routes anomaly-detector results to a **DingTalk group robot** via Webhook, with optional HMAC-SHA256 signing.
+#### 信号元数据与触发规则
 
-#### Components
+| 信号 | 图标 | 是否触发告警 | 备注 |
+|------|------|------------|------|
+| `WHALE_CONFIRMED_BUY` | 🐳🚀 | ✅ | 附巨鲸情报 |
+| `ACCUMULATION` | 🚀 | ✅ | 大盘崩盘时熔断拦截 |
+| `DUMP_RISK` | 🚨 | ✅ | |
+| `ARBITRAGE_OPPORTUNITY` | 💎 | ✅ | |
+| `IRREGULAR` | ⚠️ | ❌ 静默 | 疑似假信号，不打扰 |
+| `NORMAL` | 🟢 | ❌ 静默 | |
 
-| Class / Function | Role |
-|---------|------|
-| `DingTalkAlerter` | Low-level Webhook POST with optional HMAC-SHA256 signed URL |
-| `format_anomaly_alert()` | Pure function: `(item_name, result_dict) → DingTalk Markdown payload` |
-| `AlertDispatcher` | Filters `"NORMAL"` results; routes non-normal signals through the alerter |
+#### 熔断机制
 
-#### End-to-end usage
+当监控池**平均跨平台价差 < -1.5%**（大盘整体下跌）时，自动屏蔽 `ACCUMULATION` 和 `WHALE_CONFIRMED_BUY` 信号，防止逆势接飞刀。
 
 ```python
 from src.alerting.bot import DingTalkAlerter
 from src.alerting.dispatcher import AlertDispatcher
-from src.analysis.anomaly import MarketAnomalyDetector
 
-# 1. Configure alerter (with optional HMAC signing)
 alerter = DingTalkAlerter(
-    webhook_url="https://oapi.dingtalk.com/robot/send?access_token=YOUR_TOKEN",
-    secret="SECxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",  # optional
+    webhook_url="https://oapi.dingtalk.com/robot/send?access_token=TOKEN",
+    secret="SECxxxxx",  # 可选 HMAC 签名
 )
-
-# 2. Wrap in dispatcher (suppresses NORMAL results automatically)
 dispatcher = AlertDispatcher(alerter)
 
-# 3. Run detector and dispatch
-detector = MarketAnomalyDetector(db_config)
-result = detector.detect_anomalies(item_nameid=176923345)
+# 更新大盘风险状态（由 main.py 的 QuantOrchestrator 自动驱动）
+dispatcher.update_market_status(is_crashing=False)
 
+# 分发检测结果
 sent = dispatcher.dispatch("AK-47 | Redline (Field-Tested)", result)
-print("Alert sent" if sent else "No alert (NORMAL or insufficient data)")
 ```
-
-#### DingTalk message format
-
-`format_anomaly_alert()` builds a Markdown message with a colour-coded signal label and a metrics table:
-
-```
-## 🔴 建仓扫货 (ACCUMULATION)
-
-**饰品：** AK-47 | Redline (Field-Tested)
-**时间：** 2026-03-06T12:00:00+00:00
-**摘要：** 检测到大量买单堆积，疑似盘主入场吸筹。
 
 ---
 
-### 📊 订单簿指标
-
-| 指标           | 数值   |
-|----------------|--------|
-| OBI（订单失衡）| 0.6200 |
-| SDR（供应萎缩率）| 0.1500 |
-| 价差比率       | 0.0180 |
-| 价格动量偏差   | 0.0320 |
-| 异常得分       | -0.1240|
-```
-
-| Signal type | Icon | Summary |
-|-------------|------|---------|
-| `ACCUMULATION` | 🔴 | 建仓扫货 — large buyer absorbing supply |
-| `DUMP_RISK` | 🟠 | 撤单砸盘风险 — bid collapse / dumping risk |
-| `IRREGULAR` | 🟡 | 异常波动 — unclassified anomaly |
-| `NORMAL` | 🟢 | 正常 — no anomaly (suppressed by dispatcher) |
-
-#### `DingTalkAlerter` API
-
-| Method | Description |
-|--------|-------------|
-| `send(payload: dict) → bool` | POST a fully-formed DingTalk message payload |
-| `send_text(message: str) → bool` | Convenience: send a plain-text message |
-
-Returns `True` on success (HTTP 200 + `errcode == 0`), `False` on any error.
-
----
-
-## Import Paths & Compatibility
-
-### Canonical paths (use these in new code)
-
-```python
-from src.acquisition import SteamOrderBookFetcher, NameIdInitializer
-from src.acquisition.models import PriceRecord, ItemHistory, TradeSignal
-from src.acquisition.cache import _NameIdCache
-from src.schemas.market import OrderBookSnapshot
-from src.analysis.indicators import sma, ema, rsi, macd, bollinger_bands
-from src.analysis.market_maker import market_maker_score
-from src.analysis.anomaly import MarketAnomalyDetector
-from src.strategy.signal import generate_signals, latest_signal
-from src.backtest.engine import run_backtest
-from src.backtest.models import Trade, BacktestResult
-from src.storage.database import DatabaseConnection
-from src.storage.repository import OrderBookRepository
-from src.alerting.bot import DingTalkAlerter
-from src.alerting.formatter import format_anomaly_alert
-from src.alerting.dispatcher import AlertDispatcher
-```
-
-### Compatibility layers (kept for backwards compatibility)
-
-| Old path | Redirects to |
-|----------|--------------|
-| `from src.acquisition.models import OrderBook` | `src.schemas.market.OrderBookSnapshot` |
-
----
-
-## Running Tests
+## 运行测试
 
 ```bash
-# All tests
+# 全部测试
 python -m pytest tests/ -v
 
-# Single test file
-python -m pytest tests/test_indicators.py -v
-
-# Single test case
-python -m pytest tests/test_indicators.py::TestSMA::test_sma_basic -v
-
-# Windows (using venv)
+# Windows 虚拟环境
 .venv\Scripts\python -m pytest tests/ -v
+
+# 单个文件
+.venv\Scripts\python -m pytest tests/test_anomaly.py -v
+
+# 单个用例
+.venv\Scripts\python -m pytest tests/test_anomaly.py::TestEvaluateSignal::test_accumulation_via_sdr_z_and_obi_z -v
 ```
 
-The test suite has **161 tests** covering all modules. All database and network I/O is mocked with `MagicMock` — no real connections are needed to run the tests.
+所有测试均使用 `MagicMock` 模拟 DB 和网络，无需真实连接。**129 个测试，全部通过。**
 
-Test file map:
-
-| File | Covers |
-|------|--------|
-| `test_indicators.py` | SMA, EMA, RSI, MACD, Bollinger Bands, volume ratio |
-| `test_market_maker.py` | Volume spike, momentum, BB breakout, composite score |
-| `test_fetcher.py` | `SteamOrderBookFetcher`, `NameIdInitializer`, `_NameIdCache` |
-| `test_storage.py` | `DatabaseConnection`, `OrderBookRepository` |
-| `test_backtest.py` | `run_backtest()`, `Trade`, `BacktestResult` |
-| `test_anomaly.py` | `engineer_features()`, `MarketAnomalyDetector` |
-| `test_alerting.py` | `DingTalkAlerter`, `format_anomaly_alert()`, `AlertDispatcher` |
+| 文件 | 覆盖内容 |
+|------|---------|
+| `test_acquisition.py` | `_NameIdCache`（含 `load_from_dict`）、`CSQAQClient` |
+| `test_indicators.py` | SMA / EMA / RSI / MACD / 布林带 / 量比 |
+| `test_market_maker.py` | 量能突破、价格动量、布林突破、综合评分 |
+| `test_backtest.py` | `run_backtest()`、`BacktestResult` |
+| `test_anomaly.py` | 特征工程、`MarketAnomalyDetector`、`_evaluate_signal` |
+| `test_alerting.py` | `DingTalkAlerter`、`format_anomaly_alert()`、`AlertDispatcher` |
+| `test_storage.py` | `DatabaseConnection`、`OrderBookRepository` |
 
 ---
 
-## Notes and Risks
+## 注意事项
 
-- **Steam's 13–15% transaction fee** means every sold item loses ~15% of its value. A position must gain at least **~18% nominally** just to break even. Consider third-party platforms with lower fees (e.g. Buff163 charges ~2.5%).
-- **Daily data granularity**: Price history from Steam is aggregated daily. For higher-frequency strategies, you need a third-party data provider.
-- **No short-selling**: The CS2 market does not support shorting. The backtest engine only simulates long positions.
-- **Isolation Forest is unsupervised**: The anomaly detector has no ground truth. `contamination=0.05` assumes ~5% of data points are anomalous. Tune this for your dataset.
-- **Rate limiting**: Steam aggressively rate-limits the market API. The default 750-second polling interval is conservative but safe. Reducing it significantly increases ban risk.
-- **Educational / research purposes only**: Past performance does not guarantee future results. Always manage risk carefully. This toolkit does not constitute financial advice.
+- **Steam 手续费 13–15%**：饰品名义涨幅需超过 **~18%** 才能保本。回测结果偏保守正是这个原因。
+- **日频数据局限**：Steam 历史价格为日线。更高频策略需接入第三方数据源。
+- **不支持做空**：CS2 市场无法做空，回测只模拟单向多头。
+- **孤立森林为无监督学习**：无标注样本，`contamination=0.05` 默认假设 5% 的数据点为异常，实际使用需根据品种调整。
+- **K线二次确认为关键风控**：单纯 IsolationForest 误报率较高；量价确认 + 巨鲸追踪两道过滤大幅提升信号精度。
+- **仅用于学习与研究**：本工具不构成任何投资建议，过往表现不代表未来收益，请自行管理风险。
