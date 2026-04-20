@@ -227,12 +227,13 @@ class CSQAQClient:
             res_json = resp.json()
 
             if res_json.get("code") != 200:
-                return {"net_change": 0, "active_volume": 0}
+                return {"net_change": 0, "active_volume": 0, "lock_volume": 0}
 
             trades = res_json.get("data", {}).get("trades", [])
 
             net_change = 0
             active_volume = 0
+            lock_volume = 0  # V5.0 新增：记录被锁死（取出至个人库）的筹码数量
 
             for trade in trades:
                 # 只关心我们要狙击的那把枪
@@ -241,23 +242,24 @@ class CSQAQClient:
                     trade_type = trade.get("type")
 
                     # ==========================================
-                    # V4.0 官方枚举逻辑 (筹码真实流向判定)
+                    # V5.0 官方枚举逻辑 (筹码真实流向判定)
                     # ==========================================
                     # 4: 取出组件 (锁死筹码离开市场，庄家吸筹)
                     # 7: 卖出/存入组件 (推向市场准备套现，庄家抛售)
                     # 0(默认) 和 5(CD恢复) 作为无实质转移被忽略
 
                     if trade_type == 4:
-                        net_change += count  # 净流入增加 (看涨)
+                        net_change += count   # 净流入增加 (看涨)
+                        lock_volume += count  # 同时计入锁死筹码
                     elif trade_type == 7:
-                        net_change -= count  # 净流入减少 (看跌)
+                        net_change -= count   # 净流入减少 (看跌)
 
                     # 只要是 4 或 7，都算作有效活跃度
                     if trade_type in (4, 7):
                         active_volume += count
 
-            return {"net_change": net_change, "active_volume": active_volume}
+            return {"net_change": net_change, "active_volume": active_volume, "lock_volume": lock_volume}
 
         except Exception as exc:
             logger.error("Failed to fetch dynamics for task_id %s: %s", task_id, exc)
-            return {"net_change": 0, "active_volume": 0}
+            return {"net_change": 0, "active_volume": 0, "lock_volume": 0}

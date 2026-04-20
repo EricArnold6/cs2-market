@@ -6,8 +6,13 @@ logger = logging.getLogger(__name__)
 
 
 class WhaleTracker:
-    def __init__(self, client):
+    def __init__(self, client, cfg: dict | None = None):
         self._client = client
+        cfg = cfg or {}
+        # 净流入超过此阈值 → STRONG_PREDICTIVE_BUY（前 10 大户累计净买入件数）
+        self._buy_threshold  = cfg.get("net_flow_buy_threshold",  10)
+        # 净流出低于此阈值（负数）→ PREDICTIVE_DUMP
+        self._sell_threshold = cfg.get("net_flow_sell_threshold", -15)
 
     def calculate_accumulation_index(self, csqaq_id: int) -> dict:
         """计算指定饰品的巨鲸吸筹指数"""
@@ -40,14 +45,14 @@ class WhaleTracker:
 
         # 3. 预测逻辑判定
         # 如果大户整体极其活跃，且呈现单边净流入
-        if total_net_flow >= 20:
+        if total_net_flow >= self._buy_threshold:
             return {
                 "status": "STRONG_PREDICTIVE_BUY",
                 "net_flow": total_net_flow,
                 "msg": f"🎯 [巨鲸觉醒] 监控到前十大户累计净吸筹 {total_net_flow} 件，高度控盘拉升预警！"
             }
         # 如果大户整体呈现明显的净流出（出货）
-        elif total_net_flow <= -15:
+        elif total_net_flow <= self._sell_threshold:
             return {
                 "status": "PREDICTIVE_DUMP",
                 "net_flow": total_net_flow,

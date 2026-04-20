@@ -287,3 +287,83 @@ class TestAlertDispatcher:
         assert "markdown" in payload
         assert "title" in payload["markdown"]
         assert "text" in payload["markdown"]
+
+    # ── V5.0 circuit-breaker tests ──────────────────────────────────────────
+
+    def test_circuit_breaker_blocks_strong_predictive_buy_during_crash(self):
+        mock_alerter = MagicMock(spec=DingTalkAlerter)
+        mock_alerter.send.return_value = True
+        dispatcher = AlertDispatcher(mock_alerter)
+        dispatcher.update_market_status(is_crashing=True)
+
+        result = dispatcher.dispatch("Test Item", _make_result(signal_type="STRONG_PREDICTIVE_BUY"))
+        assert result is False
+        mock_alerter.send.assert_not_called()
+
+    def test_strong_predictive_buy_dispatched_when_market_normal(self):
+        mock_alerter = MagicMock(spec=DingTalkAlerter)
+        mock_alerter.send.return_value = True
+        dispatcher = AlertDispatcher(mock_alerter)
+
+        result = dispatcher.dispatch("Test Item", _make_result(signal_type="STRONG_PREDICTIVE_BUY"))
+        assert result is True
+        mock_alerter.send.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# TestFormatterV5
+# ---------------------------------------------------------------------------
+
+def _make_prediction(probability: float = 0.82) -> dict:
+    return {
+        "probability": probability,
+        "signal_type": "STRONG_PREDICTIVE_BUY",
+        "factors": {
+            "whale_net_flow": 18,
+            "lock_rate": 0.65,
+            "vol_ratio": 1.75,
+            "obi_z": 1.55,
+        },
+        "insight_msg": "巨鲸疯狂吸筹，流通筹码被大面积锁死。",
+    }
+
+
+class TestFormatterV5:
+    """V5.0 STRONG_PREDICTIVE_BUY alert rendering."""
+
+    def test_strong_predictive_buy_uses_purple_color(self):
+        result = _make_result(signal_type="STRONG_PREDICTIVE_BUY")
+        result["prediction"] = _make_prediction()
+        payload = format_anomaly_alert("AK-47 | Redline (FT)", result)
+        assert "#9C27B0" in payload["markdown"]["text"]
+
+    def test_ai_panel_shows_probability(self):
+        result = _make_result(signal_type="STRONG_PREDICTIVE_BUY")
+        result["prediction"] = _make_prediction(probability=0.82)
+        payload = format_anomaly_alert("AK-47 | Redline (FT)", result)
+        text = payload["markdown"]["text"]
+        assert "82.0%" in text
+
+    def test_ai_panel_shows_all_four_factors(self):
+        result = _make_result(signal_type="STRONG_PREDICTIVE_BUY")
+        result["prediction"] = _make_prediction()
+        text = format_anomaly_alert("AK-47 | Redline (FT)", result)["markdown"]["text"]
+        assert "Net Flow" in text
+        assert "Lock Rate" in text
+        assert "Vol Ratio" in text
+        assert "OBI Z-Score" in text
+
+    def test_ai_panel_shows_insight_msg(self):
+        result = _make_result(signal_type="STRONG_PREDICTIVE_BUY")
+        result["prediction"] = _make_prediction()
+        text = format_anomaly_alert("AK-47 | Redline (FT)", result)["markdown"]["text"]
+        assert "巨鲸疯狂吸筹" in text
+
+    def test_strong_predictive_buy_without_prediction_key_still_renders(self):
+        """No prediction key → panel is skipped, basic metrics still present."""
+        result = _make_result(signal_type="STRONG_PREDICTIVE_BUY")
+        payload = format_anomaly_alert("Test Item", result)
+        text = payload["markdown"]["text"]
+        assert "STRONG_PREDICTIVE_BUY" in text
+        # Panel section must NOT appear
+        assert "AI 多因子预测面板" not in text

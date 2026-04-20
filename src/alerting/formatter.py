@@ -26,6 +26,11 @@ _SIGNAL_META: dict[str, dict] = {
         "color": "#2196F3",  # 科技蓝
         "summary": "检测到显著的跨平台价差，存在无风险搬砖机会。",
     },
+    "STRONG_PREDICTIVE_BUY": {
+        "label": "🔥 深度预测建仓 (STRONG_PREDICTIVE_BUY)",
+        "color": "#9C27B0",  # 量化紫
+        "summary": "AI 多因子模型预测出极高爆发概率，建议立刻关注！",
+    },
     "IRREGULAR": {
         "label": "⚠️ 不明异动 (IRREGULAR)",
         "color": "#9E9E9E",  # 灰色
@@ -91,6 +96,24 @@ def format_anomaly_alert(item_name: str, result: dict) -> dict:
         f"| 跨平台价差 (BUFF/YYYP)| `{platform_spread:+.2f}%` |\n"
         f"| 孤立森林 AI 异常分 | `{score:.3f}` |\n"
     )
+
+    # V5.0 多因子预测专属面板
+    if signal_type == "STRONG_PREDICTIVE_BUY" and "prediction" in result:
+        pred = result["prediction"]
+        factors = pred["factors"]
+        prob = pred["probability"] * 100
+        text += (
+            "\n---\n\n"
+            "### 🤖 AI 多因子预测面板\n\n"
+            f"> **综合爆发胜率：<font color='#E62A10' size='4'>{prob:.1f}%</font>**\n>\n"
+            f"> **AI 洞察：** {pred['insight_msg']}\n\n"
+            f"| 预测因子 | 实时读数 |\n"
+            f"|------|------|\n"
+            f"| 🐋 巨鲸净流入 (Net Flow) | `{factors['whale_net_flow']:+d} 件` |\n"
+            f"| 🔒 筹码锁死度 (Lock Rate) | `{factors['lock_rate'] * 100:.1f}%` |\n"
+            f"| 📈 成交量倍率 (Vol Ratio) | `{factors['vol_ratio']:.2f}x` |\n"
+            f"| ⚠️ 盘口异动值 (OBI Z-Score) | `{factors['obi_z']:.2f}σ` |\n"
+        )
 
     # V4.0 巨鲸追踪专属情报拼接
     if signal_type == "WHALE_CONFIRMED_BUY" and "whale_msg" in result:

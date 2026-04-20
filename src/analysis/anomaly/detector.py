@@ -12,6 +12,7 @@ from sqlalchemy import create_engine, text
 from src.storage.database import DatabaseConnection
 from src.analysis.anomaly.features import engineer_features
 from src.analysis.prediction.whale_tracker import WhaleTracker
+from src.analysis.prediction.predictor import MultiFactorPredictor
 
 logger = logging.getLogger(__name__)
 
@@ -32,10 +33,32 @@ class MarketAnomalyDetector:
     """Fit an Isolation Forest and verify signals with Level-2/Whale data."""
 
     # ⚠️ 架构升级：注入 API 客户端，让探测器能拉取验证数据
-    def __init__(self, db_config: dict, client) -> None:
+    def __init__(self, db_config: dict, client, detection_cfg: dict | None = None) -> None:
         self._db = DatabaseConnection(db_config)
         self._client = client
-        self._whale_tracker = WhaleTracker(client)
+
+        cfg = detection_cfg or {}
+        z = cfg.get("z_score", {})
+        vol = cfg.get("volume", {})
+        arb = cfg.get("arbitrage", {})
+        filt = cfg.get("accumulation_filter", {})
+        whale_cfg = cfg.get("whale", {})
+
+        # Z-Score 阈值
+        self._accum_obi_z   = z.get("accumulation_obi_z", 1.8)
+        self._accum_sdr_z   = z.get("accumulation_sdr_z", 2.0)
+        self._dump_obi_z    = z.get("dump_risk_obi_z", -1.8)
+        # 成交量放量倍数
+        self._accum_vol_ratio = vol.get("accumulation_vol_ratio", 1.2)
+        self._dump_vol_ratio  = vol.get("dump_risk_vol_ratio", 1.2)
+        # 跨平台套利价差
+        self._arb_spread    = arb.get("platform_spread_threshold", 0.05)
+        # 建仓二次过滤
+        self._spread_min    = filt.get("spread_ratio_min", 0.0)
+        self._volatility_max = filt.get("volatility_max", 0.05)
+
+        self._whale_tracker = WhaleTracker(client, whale_cfg)
+        self._predictor = MultiFactorPredictor()
 
         user = db_config.get("user")
         password = db_config.get("password")
@@ -88,6 +111,7 @@ class MarketAnomalyDetector:
             signal_type = "NORMAL"
 
         whale_msg = None
+        prediction_data = None
 
         # ==========================================
         # 2. 信号二次/三次升级验证逻辑 (核心重构点)
@@ -109,6 +133,61 @@ class MarketAnomalyDetector:
                 # 无量空涨，拦截！
                 signal_type = "IRREGULAR"
 
+        # ==========================================
+        # 3. V5.0 预测路径：孤立森林未报警但盘口轻微异动
+        # ==========================================
+        # 当孤立森林认为"正常"，但 OBI Z-Score 已经悄悄超过 1.2σ，
+        # 说明可能有庄家悄悄建仓还未触发硬阈值。启动多因子打分引擎全面体检。
+        elif signal_type == "NORMAL":
+            obi_z = float(last_row["obi_z"])
+            platform_spread = float(last_row["platform_spread"])
+
+            if platform_spread > self._arb_spread:
+                signal_type = "ARBITRAGE_OPPORTUNITY"
+
+            elif obi_z > 1.2 and float(last_row["obi"]) > 0:
+                logger.info(
+                    "ID %s 突破 V5.0 初筛阈值 (obi_z=%.2f)，启动多因子预测引擎...",
+                    item_nameid, obi_z,
+                )
+
+                # ── 提取 K线成交量因子 ──────────────────────────────────
+                klines = self._client.fetch_kline_data(item_nameid, periods="1hour")
+                vol_ratio = 1.0
+                if klines and len(klines) >= 6:
+                    recent_vols = [float(k.get("v", 0)) for k in klines[-6:-1]]
+                    avg_vol = sum(recent_vols) / len(recent_vols) if recent_vols else 1.0
+                    curr_vol = float(klines[-1].get("v", 0))
+                    vol_ratio = curr_vol / (avg_vol + 1e-6)
+
+                # ── 提取巨鲸筹码因子 ────────────────────────────────────
+                top_holders = self._client.fetch_whale_ranking(item_nameid, limit=10)
+                total_net_flow = 0
+                total_active = 0
+                total_lock = 0
+                for holder in top_holders:
+                    task_id = holder.get("id")
+                    if task_id:
+                        dyn = self._client.fetch_user_inventory_dynamics(task_id, item_nameid)
+                        total_net_flow += dyn.get("net_change", 0)
+                        total_active   += dyn.get("active_volume", 0)
+                        total_lock     += dyn.get("lock_volume", 0)
+
+                lock_rate = (total_lock / total_active) if total_active > 0 else 0.0
+
+                # ── 多因子打分 ───────────────────────────────────────────
+                factors = {
+                    "obi_z":           obi_z,
+                    "vol_ratio":       vol_ratio,
+                    "whale_net_flow":  total_net_flow,
+                    "lock_rate":       lock_rate,
+                }
+                prediction = self._predictor.predict(factors)
+
+                if prediction["signal_type"] == "STRONG_PREDICTIVE_BUY":
+                    signal_type = "STRONG_PREDICTIVE_BUY"
+                    prediction_data = prediction
+
         ts = last_row["time"]
         timestamp = ts.isoformat() if isinstance(ts, pd.Timestamp) else str(ts)
 
@@ -127,6 +206,9 @@ class MarketAnomalyDetector:
         if whale_msg:
             result["whale_msg"] = whale_msg
 
+        if prediction_data:
+            result["prediction"] = prediction_data
+
         return result
 
     def _evaluate_signal(self, status: pd.Series) -> str:
@@ -139,16 +221,16 @@ class MarketAnomalyDetector:
         spread_ratio = float(status["spread_ratio"])
         volatility = float(status["price_volatility"])
 
-        if platform_spread > 0.05:
+        if platform_spread > self._arb_spread:
             return "ARBITRAGE_OPPORTUNITY"
 
-        if sdr_z > 2.0 and obi_z > 2.5 and obi > 0:
-            if spread_ratio >= 0 and volatility < 0.05:
+        if sdr_z > self._accum_sdr_z and obi_z > self._accum_obi_z and obi > 0:
+            if spread_ratio >= self._spread_min and volatility < self._volatility_max:
                 return "ACCUMULATION"
             else:
                 return "IRREGULAR"
 
-        if obi_z < -2.5 and obi < 0:
+        if obi_z < self._dump_obi_z and obi < 0:
             if spread_ratio < -0.01:
                 return "DUMP_RISK"
             else:
@@ -169,8 +251,8 @@ class MarketAnomalyDetector:
         vol_ratio = curr_vol / (avg_vol + 1e-6)
 
         if signal_type == "ACCUMULATION":
-            return vol_ratio > 1.5
+            return vol_ratio > self._accum_vol_ratio
         elif signal_type == "DUMP_RISK":
-            return vol_ratio > 1.2
+            return vol_ratio > self._dump_vol_ratio
 
         return True

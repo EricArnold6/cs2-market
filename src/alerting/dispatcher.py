@@ -67,8 +67,8 @@ class AlertDispatcher:
         # ==========================================
         # 风控拦截逻辑 (Circuit Breaker)
         # ==========================================
-        # 如果大盘暴跌，屏蔽所有的“做多”信号 (包含普通建仓和巨鲸建仓)，防止逆势接飞刀
-        if self._market_is_crashing and signal_type in ("ACCUMULATION", "WHALE_CONFIRMED_BUY"):
+        # 如果大盘暴跌，屏蔽所有的"做多"信号 (包含普通建仓、巨鲸建仓和多因子预测建仓)，防止逆势接飞刀
+        if self._market_is_crashing and signal_type in ("ACCUMULATION", "WHALE_CONFIRMED_BUY", "STRONG_PREDICTIVE_BUY"):
             score = result.get("anomaly_score", 0.0)
             logger.warning(
                 "dispatch: Blocked %s signal for %r due to systemic market crash. (Score: %.3f)",
