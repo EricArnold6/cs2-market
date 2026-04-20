@@ -25,7 +25,7 @@ class MultiFactorPredictor:
     def __init__(
         self,
         weights: dict | None = None,
-        threshold: float = 0.65,
+        threshold: float = 0.60,
     ) -> None:
         # 华尔街金科玉律：底层筹码数据 > K线量价数据 > 盘口挂单数据
         self.weights = weights or {
